@@ -22,6 +22,8 @@
   </a>
 </p>
 
+**This is Assembly Line's fork, not the original project.**
+
 **Create: Cosmonautics** is a high-fidelity industrial-aerospace expansion for the **Create Aeronautics** mod. It enables the construction of physics-driven launch vehicles, orbital stations, and interstellar exploration systems.
 
 Featuring dynamic rigid body physics, the mod integrates mechanics such as thrust-to-weight ratios, center of mass alignment, and atmospheric drag, providing an immersive aerospace experience within the Minecraft ecosystem.
