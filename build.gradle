@@ -170,6 +170,14 @@ dependencies {
 
     shade("org.luaj:luaj-jse:3.0.1")
     shade('org.orekit:orekit:13.1.4')
+
+    shade "io.github.spair:imgui-java-binding:1.87.5"
+    shade("io.github.spair:imgui-java-lwjgl3:1.87.5") {
+        exclude group: "org.lwjgl"
+    }
+    shade "io.github.spair:imgui-java-natives-windows:1.87.5"
+    shade "io.github.spair:imgui-java-natives-linux:1.87.5"
+    shade "io.github.spair:imgui-java-natives-macos:1.87.5"
 }
 
 sourceSets.main.resources { srcDir 'src/generated/resources' }
@@ -202,7 +210,8 @@ shadowJar {
     relocate 'org.hipparchus', 'dev.devce.rocketnautics.shaded.hipparchus'
     mergeServiceFiles()
     minimize {
-        exclude("org.luaj")
+        exclude(dependency('org.luaj:.*:.*'))
+        exclude(dependency('io.github.spair:.*:.*'))
     }
 }
 
