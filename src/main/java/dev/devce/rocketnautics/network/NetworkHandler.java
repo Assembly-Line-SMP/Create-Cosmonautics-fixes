@@ -7,6 +7,7 @@ import dev.devce.rocketnautics.api.FreeMotionEntity;
 import dev.devce.rocketnautics.api.orbit.ColorPalette;
 import dev.devce.rocketnautics.client.DeepSpaceHandler;
 import dev.devce.rocketnautics.client.SkyHandler;
+import dev.devce.rocketnautics.client.render.spaceRenderer.UniverseHelper;
 import dev.devce.rocketnautics.content.items.JetpackItem;
 import dev.devce.rocketnautics.content.items.LegThrustersItem;
 import dev.devce.rocketnautics.content.orbit.DeepSpaceData;
@@ -367,11 +368,13 @@ public class NetworkHandler {
     @net.neoforged.api.distmarker.OnlyIn(net.neoforged.api.distmarker.Dist.CLIENT)
     private static void handleUniverseDefinition(UniverseDefinition definition) {
         DeepSpaceHandler.receiveUniverse(definition);
+        UniverseHelper.receiveUniverse(definition);
     }
 
     @net.neoforged.api.distmarker.OnlyIn(net.neoforged.api.distmarker.Dist.CLIENT)
     private static void handleUniverseTime(long universeTicks, float serverTickRate) {
         DeepSpaceHandler.receiveUniverseTime(universeTicks, serverTickRate);
+        UniverseHelper.receiveUniverseTime(universeTicks, serverTickRate);
     }
 
     @net.neoforged.api.distmarker.OnlyIn(net.neoforged.api.distmarker.Dist.CLIENT)

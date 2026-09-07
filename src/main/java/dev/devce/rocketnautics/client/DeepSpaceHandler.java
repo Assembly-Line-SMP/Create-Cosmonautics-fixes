@@ -8,6 +8,7 @@ import dev.devce.rocketnautics.RocketConfig;
 import dev.devce.rocketnautics.RocketNautics;
 import dev.devce.rocketnautics.api.orbit.ColorPalette;
 import dev.devce.rocketnautics.api.orbit.DeepSpaceHelper;
+import dev.devce.rocketnautics.client.render.spaceRenderer.UniverseHelper;
 import dev.devce.rocketnautics.content.orbit.DeepSpaceData;
 import dev.devce.rocketnautics.content.orbit.universe.CubePlanet;
 import dev.devce.rocketnautics.content.orbit.universe.DeepSpacePosition;
@@ -25,7 +26,6 @@ import net.minecraft.client.renderer.RenderType;
 import net.minecraft.client.renderer.texture.SimpleTexture;
 import net.minecraft.core.Direction;
 import net.minecraft.network.FriendlyByteBuf;
-import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.util.ArrayListDeque;
 import net.minecraft.util.Mth;
@@ -42,6 +42,7 @@ import org.jetbrains.annotations.Nullable;
 import org.joml.Matrix4f;
 import org.joml.Quaternionf;
 import org.joml.Vector3d;
+import org.lwjgl.opengl.GL30;
 import org.orekit.frames.Frame;
 import org.orekit.orbits.KeplerianOrbit;
 import org.orekit.orbits.Orbit;
@@ -67,6 +68,11 @@ public final class DeepSpaceHandler {
     private static VertexBuffer SPHERE_ATM_VBO;    // unit-sphere (POSITION_COLOR) for atmosphere/shadow
     private static VertexBuffer CUBE_ATM_VBO;      // unit-cube   (POSITION_COLOR) for atmosphere/shadow
     private static boolean vbosBuilt = false;
+
+    private static int fullscreenVAO;
+    private static boolean vaosBuilt = false;
+
+    private static final Map<Integer, Integer> planetAtmosphereOpticalDepthMaps = new HashMap<>();
 
     // Shadow dirty-flag: only rebuild per-planet shadow VBO when light direction changes
     // Key: planet id, Value: float[3] last L vector for that planet
@@ -123,6 +129,13 @@ public final class DeepSpaceHandler {
         SPHERE_ATM_VBO = uploadColorVBO(SPHERE_VERTICES, VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
         CUBE_ATM_VBO   = uploadColorVBO(CUBE_VERTICES,   VertexFormat.Mode.QUADS, DefaultVertexFormat.POSITION_COLOR);
         vbosBuilt = true;
+    }
+
+    private static void ensureVAOs() {
+        if (vaosBuilt) return;
+
+        fullscreenVAO = GL30.glGenVertexArrays();
+        vaosBuilt = true;
     }
 
     /** Upload a CachedVertex[] array (POSITION_TEX_COLOR) into a new VertexBuffer. */
@@ -232,6 +245,8 @@ public final class DeepSpaceHandler {
     }
 
     public static void receivePosition(FriendlyByteBuf buf) {
+        UniverseHelper.receivePosition(new FriendlyByteBuf(buf.copy()));
+
         if (UNIVERSE != null) {
             receivedPositionTick = getLocalMinecraftTicks();
             receivedPosition.read(buf, UNIVERSE);
@@ -357,6 +372,9 @@ public final class DeepSpaceHandler {
 
     @SubscribeEvent
     public static void onRenderLevelStage(RenderLevelStageEvent event) {
+        boolean isModern = dev.devce.rocketnautics.RocketConfig.CLIENT.skyRenderingSystem.get() == dev.devce.rocketnautics.RocketConfig.SkyRenderingSystem.MODERN;
+        if (isModern) return;
+
         if (!DeepSpaceHelper.isDeepSpace()) return;
         if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_SKY) {
             if (receivedPositionTick == -1 || UNIVERSE == null) return;
@@ -364,12 +382,13 @@ public final class DeepSpaceHandler {
             poseStack.pushPose();
             poseStack.mulPose(event.getModelViewMatrix()); // after sky is so early that the pose stack does not have the view rotation applied
             Vec3 position = event.getCamera().getPosition();
+
             VoxelShape box = DeepSpaceData.getBoxForPosition(position);
             if (box.bounds().contains(position)) {
                 float partial = event.getPartialTick().getGameTimeDeltaPartialTick(true);
                 AbsoluteDate currentDate = getRenderDate(partial);
                 renderUniverse(null, poseStack, null, event.getPartialTick().getGameTimeDeltaTicks(),
-                        partial, currentDate, receivedPosition.getPosition(currentDate), receivedPosition.getFrame(), event.getCamera());
+                        partial, currentDate, receivedPosition.getPosition(currentDate), receivedPosition.getFrame(), event.getCamera(), event.getModelViewMatrix());
             }
             poseStack.popPose();
         } else if (event.getStage() == RenderLevelStageEvent.Stage.AFTER_WEATHER) {
@@ -490,7 +509,7 @@ public final class DeepSpaceHandler {
         return false;
     }
 
-    private static void renderUniverse(@Nullable CubePlanet exclude, PoseStack poseStack, @Nullable Quaternionf rotation, float deltaTick, float partialTick, AbsoluteDate renderDate, Vector3D pos, Frame posFrame, Camera camera) {
+    private static void renderUniverse(@Nullable CubePlanet exclude, PoseStack poseStack, @Nullable Quaternionf rotation, float deltaTick, float partialTick, AbsoluteDate renderDate, Vector3D pos, Frame posFrame, Camera camera, Matrix4f modelViewMatrix) {
         Minecraft mc = Minecraft.getInstance();
         if (mc.level == null || mc.player == null) return;
 
@@ -521,6 +540,7 @@ public final class DeepSpaceHandler {
 
         // 3. Ensure planet VBOs are uploaded to GPU (one-time, on first render)
         ensureVBOs();
+        ensureVAOs();
 
         // 3. Celestial bodies / planets rendering
         IntList needRenderData = new IntArrayList();
@@ -558,7 +578,7 @@ public final class DeepSpaceHandler {
             PlanetDistanceEntry entry = PLANET_ENTRIES.get(i);
             if (!isDeepSpace && !RocketConfig.CLIENT.enableCustomSky.get()) continue;
             poseStack.pushPose();
-            if (renderPlanet(entry.planet, entry.pos, poseStack, renderDate, celestialAngle, partialTick)) {
+            if (renderPlanet(entry.planet, entry.pos, poseStack, renderDate, posFrame, celestialAngle, partialTick, camera, modelViewMatrix)) {
                 if (!AWAITING_SERVER.put(entry.planet.id(), true)) {
                     needRenderData.add(entry.planet.id());
                 }
@@ -570,44 +590,12 @@ public final class DeepSpaceHandler {
         poseStack.popPose();
     }
 
-    private static boolean renderPlanet(CubePlanet planet, Vector3D ourPosInPlanetFrame, PoseStack poseStack, AbsoluteDate date, float celestialAngle, float partialTicks) {
+    private static boolean renderPlanet(CubePlanet planet, Vector3D ourPosInPlanetFrame, PoseStack poseStack, AbsoluteDate date, Frame frame, float celestialAngle, float partialTicks, Camera camera, Matrix4f modelViewMatrixy) {
         assert UNIVERSE != null;
+
         Minecraft mc = Minecraft.getInstance();
-        boolean isModern = dev.devce.rocketnautics.RocketConfig.CLIENT.skyRenderingSystem.get() == dev.devce.rocketnautics.RocketConfig.SkyRenderingSystem.MODERN;
         IntObjectPair<PreparedTexture> render = KNOWN_RENDER_DATA.get(planet.id());
-        if (render != null && render.right() != null) {
-            boolean isCachedTextureModern = !(render.right() instanceof DeepSpaceTexture);
-            if (isModern != isCachedTextureModern) {
-                render.right().retire();
-                KNOWN_RENDER_DATA.remove(planet.id());
-                render = null;
-            }
-        }
-        if (isModern && (render == null || render.right() == null)) {
-            ResourceLocation bakedTex = SkyHandler.loadBakedPlanetTexture(planet.frame().getName(), planet.id());
-            ResourceLocation bakedNormalTex = SkyHandler.loadBakedPlanetNormalTexture(planet.frame().getName(), planet.id());
-            if (bakedTex != null) {
-                PreparedTexture prepared = new PreparedTexture() {
-                    @Override
-                    public ResourceLocation getId() {
-                        return bakedTex;
-                    }
-                    @Override
-                    public ResourceLocation getNormalId() {
-                        return bakedNormalTex;
-                    }
-                    @Override
-                    public void retire() {
-                        Minecraft.getInstance().getTextureManager().release(bakedTex);
-                        if (bakedNormalTex != null) {
-                            Minecraft.getInstance().getTextureManager().release(bakedNormalTex);
-                        }
-                    }
-                };
-                render = IntObjectPair.of(SkyHandler.getMaximumScale(), prepared);
-                KNOWN_RENDER_DATA.put(planet.id(), render);
-            }
-        }
+
         if (render == null || render.leftInt() != SkyHandler.getMaximumScale() || render.right() == null) {
             return true;
         }
@@ -652,19 +640,6 @@ public final class DeepSpaceHandler {
             L = planet.getRotationAtTime(date).applyInverseTo(L);
         }
 
-        if (isModern && !planet.extras().star()) {
-            if (planetNormalShader != null) {
-                if (planetNormalShader.safeGetUniform("LightDir") != null) {
-                    planetNormalShader.safeGetUniform("LightDir").set((float) L.getX(), (float) L.getY(), (float) L.getZ());
-                }
-                RenderSystem.setShader(() -> planetNormalShader);
-            } else {
-                RenderSystem.setShader(GameRenderer::getPositionTexColorShader);
-            }
-        } else {
-            RenderSystem.setShader(GameRenderer::getPositionTexColorShader);
-        }
-
         // Note: ensureStarPlasmaTexture() is called once before the planet loop in renderUniverse.
         if (planet.extras().star()) {
             if (SkyHandler.STAR_PLASMA_TEXTURE_ID != null) {
@@ -674,9 +649,6 @@ public final class DeepSpaceHandler {
             }
         } else {
             render.right().setShaderTexture();
-            if (isModern && render.right().getNormalId() != null) {
-                RenderSystem.setShaderTexture(1, render.right().getNormalId());
-            }
         }
 
         Matrix4f matrix = poseStack.last().pose();
@@ -686,13 +658,12 @@ public final class DeepSpaceHandler {
         VertexBuffer mainVBO = isSphere ? SPHERE_VBO : CUBE_VBO;
         RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
         Matrix4f scaledMatrix = new Matrix4f(matrix).scale(size);
-        net.minecraft.client.renderer.ShaderInstance activeShader;
-        if (isModern && !planet.extras().star() && planetNormalShader != null) {
-            activeShader = planetNormalShader;
-        } else {
-            activeShader = RenderSystem.getShader();
-        }
+        net.minecraft.client.renderer.ShaderInstance activeShader = RenderSystem.getShader();
+
         drawVBO(mainVBO, scaledMatrix, activeShader);
+        RenderSystem.disableDepthTest();
+        RenderSystem.depthMask(false);
+
 
         if (planet.extras().star() && isSphere) {
             // Render 3 extra rotating, pulsating plasma layers for a highly turbulent, volumetric 3D solar storm!
@@ -733,28 +704,19 @@ public final class DeepSpaceHandler {
                 RenderSystem.setShaderTexture(0, cloudTexture);
                 net.minecraft.client.renderer.ShaderInstance cloudShader = RenderSystem.getShader();
 
-                if (!isModern) {
-                    // Cloud Shadows — shifted + tinted draw
-                    double theta = 2.0 * Math.PI * celestialAngle;
-                    float lx = (float) -Math.sin(theta);
-                    float shadowShift = lx * size * 0.08f;
-                    float shadowSize = size * 1.01f;
-                    Matrix4f shadowMatrix = new Matrix4f(matrix).translate(shadowShift, 0, 0).scale(shadowSize);
-                    RenderSystem.setShaderColor(0.01f, 0.02f, 0.08f, 0.48f);
-                    drawVBO(mainVBO, shadowMatrix, cloudShader);
-                    RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
-                }
-
-                // Single semi-transparent cloud layer — drawn via GPU VBO (zero CPU vertex overhead)
-                Matrix4f cloudMatrix = new Matrix4f(matrix).scale(size * 1.015f);
-                RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 0.45f);
-                drawVBO(mainVBO, cloudMatrix, cloudShader);
-                RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, 1.0f);
+                double theta = 2.0 * Math.PI * celestialAngle;
+                float lx = (float) -Math.sin(theta);
+                float shadowShift = lx * size * 0.08f;
+                float shadowSize = size * 1.01f;
+                Matrix4f shadowMatrix = new Matrix4f(matrix).translate(shadowShift, 0, 0).scale(shadowSize);
+                RenderSystem.setShaderColor(0.01f, 0.02f, 0.08f, 0.48f);
+                drawVBO(mainVBO, shadowMatrix, cloudShader);
+                RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
             }
         }
 
         // Shadow overlay: rebuild shadow VBO only when light direction changes significantly
-        if (!isModern && planet.extras().renderShadow()) {
+        if (planet.extras().renderShadow()) {
             float shadowScale = planet.extras().clouds() ? size * 1.035f : size * 1.002f;
 
             RenderSystem.enableBlend();
@@ -782,7 +744,7 @@ public final class DeepSpaceHandler {
             RenderSystem.setShaderColor(1f, 1f, 1f, 1f);
         }
 
-        if ((!isModern || planet.extras().star()) && planet.extras().diffuseLayers()) {
+        if (planet.extras().star() && planet.extras().diffuseLayers()) {
             RenderSystem.enableBlend();
             RenderSystem.blendFunc(GlStateManager.SourceFactor.SRC_ALPHA, GlStateManager.DestFactor.ONE);
             RenderSystem.setShader(GameRenderer::getPositionColorShader);
@@ -791,29 +753,6 @@ public final class DeepSpaceHandler {
             int layers = planet.extras().diffuseLayerCount();
 
             float ar = 1.0f, ag = 1.0f, ab = 1.0f;
-            if (!planet.extras().star()) {
-                double tAngle = celestialAngle * 2.0 * Math.PI;
-                float sunIntensity = (float) Math.cos(tAngle);
-                float sideIntensity = (float) Math.abs(Math.sin(tAngle));
-                if (sunIntensity > 0) {
-                    float t = sideIntensity;
-                    ar = net.minecraft.util.Mth.lerp(t, 0.40f, 1.00f);
-                    ag = net.minecraft.util.Mth.lerp(t, 0.70f, 0.42f);
-                    ab = net.minecraft.util.Mth.lerp(t, 1.00f, 0.15f);
-                } else {
-                    float t = -sunIntensity;
-                    ar = net.minecraft.util.Mth.lerp(t, 1.00f, 0.18f);
-                    ag = net.minecraft.util.Mth.lerp(t, 0.42f, 0.08f);
-                    ab = net.minecraft.util.Mth.lerp(t, 0.15f, 0.45f);
-                }
-
-                float terminatorFactor = Math.max(0.0f, 1.0f - (Math.abs(sunIntensity) / 0.45f));
-                terminatorFactor = terminatorFactor * terminatorFactor * (3.0f - 2.0f * terminatorFactor);
-                ar = net.minecraft.util.Mth.lerp(terminatorFactor, ar, 1.00f);
-                ag = net.minecraft.util.Mth.lerp(terminatorFactor, ag, 0.48f);
-                ab = net.minecraft.util.Mth.lerp(terminatorFactor, ab, 0.12f);
-            }
-
             VertexBuffer atmVBO = isSphere ? SPHERE_ATM_VBO : CUBE_ATM_VBO;
             if (atmVBO != null) {
                 net.minecraft.client.renderer.ShaderInstance atmShader = RenderSystem.getShader();
@@ -855,7 +794,7 @@ public final class DeepSpaceHandler {
                         aa = (0.05f * (float)Math.pow(1.0f - progress, 2.0f)) * 1.0f;
                     }
 
-                    RenderSystem.setShaderColor(lr, lg, lb, aa);
+                    RenderSystem.setShaderColor(1.0f, 1.0f, 1.0f, aa);
                     layerMatrix.set(matrix).scale(s);
                     drawBoundVBO(atmVBO, layerMatrix, atmShader);
                 }
@@ -870,6 +809,7 @@ public final class DeepSpaceHandler {
         RenderSystem.enableDepthTest();
 
         poseStack.popPose();
+
         return false;
     }
 
@@ -1214,7 +1154,7 @@ public final class DeepSpaceHandler {
         if (level.dimension() != net.minecraft.world.level.Level.OVERWORLD) {
             poseStack.mulPose(DeepSpaceHelper.adapt(globalCoords.second()).get(new Quaternionf()).conjugate());
         }
-        renderUniverse(planet, poseStack, null, partialDelta, partialTick, date, globalCoords.first().getPosition(), planet.orekitFrame(), camera);
+        renderUniverse(planet, poseStack, null, partialDelta, partialTick, date, globalCoords.first().getPosition(), planet.orekitFrame(), camera, new Matrix4f());
         poseStack.popPose();
     }
 }
