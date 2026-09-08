@@ -38,7 +38,7 @@ Fulfill your childhood dream of becoming an astronaut. Build your own rocket and
 
 ### Compatibility for addons
 *   **Different fuels:** Use mods like TFMG or Create Diesel Generators to improve fuel efficiency.
-*   **Data-driven universe:** Easily add new planets or celestial bodies via a datapack. [Wiki](wiki)
+*   **Data-driven universe:** Easily add new planets or celestial bodies via a datapack. [Wiki](https://github.com/CosmonauticsTeam/Create-Cosmonautics/wiki)
 
 ## Technical Specifications and Requirements
 
