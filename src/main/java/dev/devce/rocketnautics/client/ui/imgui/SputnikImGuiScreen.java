@@ -123,7 +123,13 @@ public class SputnikImGuiScreen extends Screen {
             return true;
         }
 
-        if (!ImGuiManager.getInstance().isWantCaptureKeyboard()) {
+        if (ctrl && keyCode == GLFW.GLFW_KEY_S) {
+            SputnikNodeGraphPanel.saveGraphToServer(graph, sputnikId, pos);
+            return true;
+        }
+
+        boolean wantTextInput = ImGuiManager.getInstance().isActive() && imgui.ImGui.getIO().getWantTextInput();
+        if (!wantTextInput) {
             if (keyCode == GLFW.GLFW_KEY_X || keyCode == GLFW.GLFW_KEY_DELETE) {
                 SputnikNodeGraphPanel.deleteSelected(graph);
                 return true;
@@ -132,8 +138,18 @@ public class SputnikImGuiScreen extends Screen {
                 SputnikNodeGraphPanel.selectAll(graph);
                 return true;
             }
-            if (ctrl && keyCode == GLFW.GLFW_KEY_S) {
-                SputnikNodeGraphPanel.saveGraphToServer(graph, sputnikId, pos);
+            if (keyCode == GLFW.GLFW_KEY_EQUAL || keyCode == GLFW.GLFW_KEY_KP_ADD) {
+                graph.setZoom(Math.min(2.5f, graph.getZoom() * 1.15f));
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_MINUS || keyCode == GLFW.GLFW_KEY_KP_SUBTRACT) {
+                graph.setZoom(Math.max(0.3f, graph.getZoom() / 1.15f));
+                return true;
+            }
+            if (keyCode == GLFW.GLFW_KEY_HOME) {
+                graph.setPanX(0.0f);
+                graph.setPanY(0.0f);
+                graph.setZoom(1.0f);
                 return true;
             }
         }

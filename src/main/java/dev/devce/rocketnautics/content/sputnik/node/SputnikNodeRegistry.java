@@ -31,6 +31,7 @@ public final class SputnikNodeRegistry {
 
         register(new SensorAltitudeHandler());
         register(new SensorVelocityHandler());
+        register(new SensorAttitudeHandler());
 
         register(new DisplayHandler("display", "Display", ImColor.rgb(40, 140, 110)));
         register(new DisplayHandler("display_bridge", "Display Bridge", ImColor.rgb(168, 72, 72)));
@@ -299,6 +300,53 @@ public final class SputnikNodeRegistry {
         public void execute(SputnikNode node, NodeExecutionContext ctx) {
             double spd = ctx.getBlockEntity() != null ? ctx.getBlockEntity().getVelocity() : 0.0;
             ctx.setOutput("spd", spd);
+        }
+    }
+
+    private static class SensorAttitudeHandler implements INodeHandler {
+        public String getTypeId() { return "sensor_attitude"; }
+        public String getTitle() { return "Attitude"; }
+        public String getCategory() { return "Sensors"; }
+        public int getHeaderColor() { return ImColor.rgb(90, 70, 150); }
+        public List<SputnikPin> createInputs() { return List.of(); }
+        public List<SputnikPin> createOutputs() {
+            return List.of(
+                    new SputnikPin("pitch", "Pitch", PinType.NUMBER, false),
+                    new SputnikPin("yaw", "Yaw", PinType.NUMBER, false),
+                    new SputnikPin("roll", "Roll", PinType.NUMBER, false),
+                    new SputnikPin("x", "Dir X", PinType.NUMBER, false),
+                    new SputnikPin("y", "Dir Y", PinType.NUMBER, false),
+                    new SputnikPin("z", "Dir Z", PinType.NUMBER, false)
+            );
+        }
+        public void execute(SputnikNode node, NodeExecutionContext ctx) {
+            if (ctx.getBlockEntity() != null) {
+                var be = ctx.getBlockEntity();
+                double pitch = be.getAttitudePitch();
+                double yaw = be.getAttitudeYaw();
+                double roll = be.getAttitudeRoll();
+                var fwd = be.getForwardVector();
+
+                ctx.setOutput("pitch", pitch);
+                ctx.setOutput("yaw", yaw);
+                ctx.setOutput("roll", roll);
+                ctx.setOutput("x", fwd.x);
+                ctx.setOutput("dir_x", fwd.x);
+                ctx.setOutput("y", fwd.y);
+                ctx.setOutput("dir_y", fwd.y);
+                ctx.setOutput("z", fwd.z);
+                ctx.setOutput("dir_z", fwd.z);
+            } else {
+                ctx.setOutput("pitch", 0.0);
+                ctx.setOutput("yaw", 0.0);
+                ctx.setOutput("roll", 0.0);
+                ctx.setOutput("x", 0.0);
+                ctx.setOutput("dir_x", 0.0);
+                ctx.setOutput("y", 0.0);
+                ctx.setOutput("dir_y", 0.0);
+                ctx.setOutput("z", 1.0);
+                ctx.setOutput("dir_z", 1.0);
+            }
         }
     }
 

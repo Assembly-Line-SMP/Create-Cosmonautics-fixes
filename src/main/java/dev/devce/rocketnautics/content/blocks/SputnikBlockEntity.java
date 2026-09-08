@@ -15,6 +15,7 @@ import net.minecraft.world.level.biome.Biome;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.entity.BlockEntityType;
 import net.minecraft.world.level.block.state.BlockState;
+import org.joml.Quaterniond;
 import org.joml.Vector3d;
 
 import com.simibubi.create.api.equipment.goggles.IHaveGoggleInformation;
@@ -124,6 +125,10 @@ public class SputnikBlockEntity extends BlockEntity implements IHaveGoggleInform
         if (level == null) return null;
         Object lvlObj = level;
         if (lvlObj instanceof SubLevel sl) return sl;
+        if (level.isClientSide()) {
+            var csl = dev.ryanhcode.sable.Sable.HELPER.getContainingClient(this);
+            if (csl != null) return csl;
+        }
         Object obj = dev.ryanhcode.sable.Sable.HELPER.getContaining(level, worldPosition);
         if (obj instanceof SubLevel sl) return sl;
         return null;
@@ -204,31 +209,51 @@ public class SputnikBlockEntity extends BlockEntity implements IHaveGoggleInform
         return angle;
     }
 
-    public double getPitch() {
+    public Quaterniond getOrientation() {
         SubLevel subLevel = getSubLevel();
         if (subLevel != null) {
-            Vector3d euler = subLevel.logicalPose().orientation().getEulerAnglesYXZ(new Vector3d());
-            return Math.toDegrees(euler.x);
+            if (subLevel instanceof dev.ryanhcode.sable.sublevel.ClientSubLevel csl) {
+                return new Quaterniond(csl.renderPose().orientation());
+            }
+            return new Quaterniond(subLevel.logicalPose().orientation());
         }
-        return 0;
+        return new Quaterniond();
+    }
+
+    public Vector3d getForwardVector() {
+        Quaterniond rot = getOrientation();
+        Vector3d fwd = new Vector3d(0, 0, 1);
+        rot.transform(fwd);
+        return fwd;
+    }
+
+    public double getAttitudePitch() {
+        Vector3d fwd = getForwardVector();
+        return Math.toDegrees(Math.asin(Math.max(-1.0, Math.min(1.0, fwd.y))));
+    }
+
+    public double getAttitudeYaw() {
+        Vector3d fwd = getForwardVector();
+        return (Math.toDegrees(Math.atan2(fwd.x, fwd.z)) + 360.0) % 360.0;
+    }
+
+    public double getAttitudeRoll() {
+        Quaterniond rot = getOrientation();
+        Vector3d camUp = new Vector3d(0, 1, 0);
+        rot.transformInverse(camUp);
+        return Math.toDegrees(Math.atan2(camUp.x, camUp.y));
+    }
+
+    public double getPitch() {
+        return getAttitudePitch();
     }
 
     public double getYaw() {
-        SubLevel subLevel = getSubLevel();
-        if (subLevel != null) {
-            Vector3d euler = subLevel.logicalPose().orientation().getEulerAnglesYXZ(new Vector3d());
-            return Math.toDegrees(euler.y);
-        }
-        return 0;
+        return getAttitudeYaw();
     }
 
     public double getRoll() {
-        SubLevel subLevel = getSubLevel();
-        if (subLevel != null) {
-            Vector3d euler = subLevel.logicalPose().orientation().getEulerAnglesYXZ(new Vector3d());
-            return Math.toDegrees(euler.z);
-        }
-        return 0;
+        return getAttitudeRoll();
     }
 
     public double getShipMass() {

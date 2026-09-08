@@ -119,6 +119,12 @@ public final class SputnikNodeGraphPanel {
             ImGui.pushStyleColor(imgui.flag.ImGuiCol.MenuBarBg, 0.140f, 0.140f, 0.145f, 1.0f);
         }
 
+        float zoom = graph.getZoom();
+        if (zoom <= 0.05f) {
+            zoom = 1.0f;
+            graph.setZoom(1.0f);
+        }
+
         if (ImGui.begin("##SputnikGraphCanvas", windowFlags)) {
 
             renderMenuBar(graph, sputnikId, pos, io);
@@ -131,26 +137,37 @@ public final class SputnikNodeGraphPanel {
 
             handlePanning(graph, io);
 
-            drawGrid(drawList, canvasX, canvasY, canvasW, canvasH, graph.getPanX(), graph.getPanY());
+            handleMouseWheelZoom(graph, canvasX, canvasY, io);
+            zoom = graph.getZoom();
+
+            drawGrid(drawList, canvasX, canvasY, canvasW, canvasH, graph.getPanX(), graph.getPanY(), zoom);
 
             float originX = canvasX + graph.getPanX();
             float originY = canvasY + graph.getPanY();
 
-            updateMultiNodeDragging(graph, io);
+            updateMultiNodeDragging(graph, io, zoom);
 
-            drawLinks(drawList, graph, originX, originY, io);
+            ImGui.setWindowFontScale(zoom);
 
-            drawPendingLink(drawList, graph, originX, originY, io);
+            drawLinks(drawList, graph, originX, originY, io, zoom);
 
-            drawNodes(drawList, graph, originX, originY, io);
+            drawPendingLink(drawList, graph, originX, originY, io, zoom);
 
-            handleBoxSelection(drawList, graph, originX, originY, io);
+            drawNodes(drawList, graph, originX, originY, io, zoom);
 
-            handleMouseWheelAdjust(graph, originX, originY, io);
+            ImGui.setWindowFontScale(1.0f);
+
+            handleBoxSelection(drawList, graph, originX, originY, io, zoom);
 
             handleNodeContextMenu(graph);
 
-            handleCanvasContextMenu(graph, originX, originY, io);
+            handleCanvasContextMenu(graph, originX, originY, io, zoom);
+
+            if (!io.getWantTextInput()) {
+                if (ImGui.isKeyPressed(GLFW.GLFW_KEY_X) || ImGui.isKeyPressed(GLFW.GLFW_KEY_DELETE)) {
+                    deleteSelected(graph);
+                }
+            }
         }
         ImGui.end();
         ImGui.popStyleColor(2);
@@ -226,8 +243,8 @@ public final class SputnikNodeGraphPanel {
                 if (ImGui.beginMenu(entry.getKey())) {
                     for (INodeHandler h : entry.getValue()) {
                         if (ImGui.menuItem(h.getTitle())) {
-                            float spawnX = 140.0f - graph.getPanX();
-                            float spawnY = 140.0f - graph.getPanY();
+                            float spawnX = (140.0f - graph.getPanX()) / Math.max(0.05f, graph.getZoom());
+                            float spawnY = (140.0f - graph.getPanY()) / Math.max(0.05f, graph.getZoom());
                             SputnikNode node = new SputnikNode(graph.allocateNodeId(), h.getTypeId(), spawnX, spawnY);
                             graph.addNode(node);
                             selectedNodeIds.clear();
@@ -258,8 +275,15 @@ public final class SputnikNodeGraphPanel {
                 graph.setPanX(0.0f);
                 graph.setPanY(0.0f);
             }
-            if (ImGui.menuItem("Reset Zoom")) {
+            String zoomLabel = String.format(Locale.ROOT, "Reset Zoom (%.0f%%)", graph.getZoom() * 100.0f);
+            if (ImGui.menuItem(zoomLabel, "1:1")) {
                 graph.setZoom(1.0f);
+            }
+            if (ImGui.menuItem("Zoom In (+15%)", "+ / =")) {
+                graph.setZoom(Math.min(2.5f, graph.getZoom() * 1.15f));
+            }
+            if (ImGui.menuItem("Zoom Out (-15%)", "-")) {
+                graph.setZoom(Math.max(0.3f, graph.getZoom() / 1.15f));
             }
             ImGui.separator();
             if (ImGui.beginMenu("Setup")) {
@@ -296,6 +320,9 @@ public final class SputnikNodeGraphPanel {
             }
             ImGui.endMenu();
         }
+
+        ImGui.sameLine(io.getDisplaySizeX() - 170.0f);
+        ImGui.textDisabled(String.format(Locale.ROOT, "Zoom: %.0f%%", graph.getZoom() * 100.0f));
 
         if (System.currentTimeMillis() - lastSavedTime < 2500) {
             ImGui.sameLine(io.getDisplaySizeX() - 80.0f);
@@ -405,12 +432,56 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static void handleBoxSelection(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io) {
+    private static void handleMouseWheelZoom(SputnikGraph graph, float canvasX, float canvasY, ImGuiIO io) {
+        float wheel = io.getMouseWheel();
+        if (Math.abs(wheel) < 0.01f) return;
+
+        float mx = io.getMousePosX();
+        float my = io.getMousePosY();
+        float zoom = graph.getZoom();
+        if (zoom <= 0.05f) zoom = 1.0f;
+        float originX = canvasX + graph.getPanX();
+        float originY = canvasY + graph.getPanY();
+
+        if (!io.getKeyCtrl()) {
+            for (SputnikNode node : graph.getNodes()) {
+                if (!"constant_number".equals(node.getTypeId())) continue;
+
+                float nx = originX + node.getX() * zoom;
+                float ny = originY + node.getY() * zoom;
+                float headerH = ((themeMode == ThemeMode.OLDSCHOOL) ? 18.0f : 24.0f) * zoom;
+                if (isWidgetArea(node, nx, ny, headerH, mx, my, zoom)) {
+                    double step = io.getKeyShift() ? 0.1 : 1.0;
+                    node.setCustomNumber(node.getCustomNumber() + wheel * step);
+                    return;
+                }
+            }
+        }
+
+        float zoomFactor = wheel > 0 ? 1.12f : (1.0f / 1.12f);
+        float newZoom = Math.max(0.3f, Math.min(2.5f, zoom * zoomFactor));
+        if (Math.abs(newZoom - zoom) < 0.001f) return;
+
+        float panX = graph.getPanX();
+        float panY = graph.getPanY();
+
+        float gx = (mx - canvasX - panX) / zoom;
+        float gy = (my - canvasY - panY) / zoom;
+
+        float newPanX = mx - canvasX - gx * newZoom;
+        float newPanY = my - canvasY - gy * newZoom;
+
+        graph.setPanX(newPanX);
+        graph.setPanY(newPanY);
+        graph.setZoom(newZoom);
+    }
+
+    private static void handleBoxSelection(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io, float zoom) {
         float mx = io.getMousePosX();
         float my = io.getMousePosY();
 
         if (ImGui.isMouseClicked(ImGuiMouseButton.Left)) {
-            if (my > 28.0f && !isMouseOverAnyNode(graph, originX, originY, mx, my) && draggingNodeId == -1 && dragFromNodeId == -1) {
+            if (my > 28.0f && !isMouseOverAnyNode(graph, originX, originY, mx, my, zoom) && draggingNodeId == -1 && dragFromNodeId == -1) {
                 isBoxSelecting = true;
                 boxSelectStartX = mx;
                 boxSelectStartY = my;
@@ -442,10 +513,10 @@ public final class SputnikNodeGraphPanel {
                 }
 
                 for (SputnikNode node : graph.getNodes()) {
-                    float nx = originX + node.getX();
-                    float ny = originY + node.getY();
-                    float nw = node.getWidth();
-                    float nh = node.getHeight();
+                    float nx = originX + node.getX() * zoom;
+                    float ny = originY + node.getY() * zoom;
+                    float nw = node.getWidth() * zoom;
+                    float nh = node.getHeight() * zoom;
 
                     boolean intersects = !(nx > maxX || nx + nw < minX || ny > maxY || ny + nh < minY);
                     if (intersects) {
@@ -458,34 +529,14 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static void handleMouseWheelAdjust(SputnikGraph graph, float originX, float originY, ImGuiIO io) {
-        float wheel = io.getMouseWheel();
-        if (Math.abs(wheel) < 0.01f) return;
-
-        float mx = io.getMousePosX();
-        float my = io.getMousePosY();
-
-        for (SputnikNode node : graph.getNodes()) {
-            if (!"constant_number".equals(node.getTypeId())) continue;
-
-            float nx = originX + node.getX();
-            float ny = originY + node.getY();
-            if (mx >= nx && mx <= nx + node.getWidth() && my >= ny && my <= ny + node.getHeight()) {
-                double step = io.getKeyShift() ? 0.1 : (io.getKeyCtrl() ? 10.0 : 1.0);
-                node.setCustomNumber(node.getCustomNumber() + wheel * step);
-                return;
-            }
-        }
-    }
-
-    private static void updateMultiNodeDragging(SputnikGraph graph, ImGuiIO io) {
+    private static void updateMultiNodeDragging(SputnikGraph graph, ImGuiIO io, float zoom) {
         float mx = io.getMousePosX();
         float my = io.getMousePosY();
 
         if (draggingNodeId != -1) {
             if (ImGui.isMouseDown(ImGuiMouseButton.Left)) {
-                float deltaX = mx - lastMouseX;
-                float deltaY = my - lastMouseY;
+                float deltaX = (mx - lastMouseX) / zoom;
+                float deltaY = (my - lastMouseY) / zoom;
 
                 for (int id : selectedNodeIds) {
                     SputnikNode node = graph.findNode(id);
@@ -503,10 +554,10 @@ public final class SputnikNodeGraphPanel {
         lastMouseY = my;
     }
 
-    private static void drawGrid(ImDrawList drawList, float x, float y, float w, float h, float sx, float sy) {
+    private static void drawGrid(ImDrawList drawList, float x, float y, float w, float h, float sx, float sy, float zoom) {
         if (themeMode == ThemeMode.CUSTOM) {
             SputnikCustomTheme custom = SputnikCustomTheme.get();
-            float gridSize = Math.max(8.0f, custom.gridSize);
+            float gridSize = Math.max(8.0f, custom.gridSize * zoom);
             int step = Math.max(1, custom.gridMajorStep);
 
             int gridCol = (custom.rainbowEnabled && custom.rainbowGrid)
@@ -528,7 +579,7 @@ public final class SputnikNodeGraphPanel {
                 countY++;
             }
         } else if (themeMode == ThemeMode.OLDSCHOOL) {
-            float gridSize = 20.0f;
+            float gridSize = 20.0f * zoom;
             int gridCol = ImColor.rgba(255, 255, 255, 18); // 0x12FFFFFF
             for (float gx = (sx % gridSize); gx < w; gx += gridSize) {
                 drawList.addLine(x + gx, y, x + gx, y + h, gridCol, 1.0f);
@@ -537,7 +588,7 @@ public final class SputnikNodeGraphPanel {
                 drawList.addLine(x, y + gy, x + w, y + gy, gridCol, 1.0f);
             }
         } else {
-            float gridSize = 28.0f;
+            float gridSize = 28.0f * zoom;
             int dotCol = ImColor.rgba(255, 255, 255, 22);
             int dotMajorCol = ImColor.rgba(255, 255, 255, 55);
 
@@ -546,7 +597,7 @@ public final class SputnikNodeGraphPanel {
                 int countY = 0;
                 for (float gy = (sy % gridSize); gy < h; gy += gridSize) {
                     boolean isMajor = (countX % 4 == 0) && (countY % 4 == 0);
-                    drawList.addCircleFilled(x + gx, y + gy, isMajor ? 1.6f : 1.1f, isMajor ? dotMajorCol : dotCol);
+                    drawList.addCircleFilled(x + gx, y + gy, (isMajor ? 1.6f : 1.1f) * Math.max(0.5f, zoom), isMajor ? dotMajorCol : dotCol);
                     countY++;
                 }
                 countX++;
@@ -554,7 +605,7 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static void drawLinks(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io) {
+    private static void drawLinks(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io, float zoom) {
         float mx = io.getMousePosX();
         float my = io.getMousePosY();
         SputnikLink linkToCut = null;
@@ -568,12 +619,12 @@ public final class SputnikNodeGraphPanel {
             SputnikPin fromPin = fromNode.findPin(link.getFromPinId());
             int linkColor = fromPin != null ? fromPin.getType().getColor() : ImColor.rgb(180, 190, 200);
 
-            ImVec2 p1 = getPinPos(fromNode, link.getFromPinId(), originX, originY);
-            ImVec2 p2 = getPinPos(toNode, link.getToPinId(), originX, originY);
+            ImVec2 p1 = getPinPos(fromNode, link.getFromPinId(), originX, originY, zoom);
+            ImVec2 p2 = getPinPos(toNode, link.getToPinId(), originX, originY, zoom);
 
-            float dist = Math.max(35.0f, Math.abs(p2.x - p1.x) * 0.5f);
+            float dist = Math.max(35.0f * zoom, Math.abs(p2.x - p1.x) * 0.5f);
 
-            boolean wireHovered = isMouseNearCubicBezier(mx, my, p1.x, p1.y, p1.x + dist, p1.y, p2.x - dist, p2.y, p2.x, p2.y);
+            boolean wireHovered = isMouseNearCubicBezier(mx, my, p1.x, p1.y, p1.x + dist, p1.y, p2.x - dist, p2.y, p2.x, p2.y, zoom);
 
             if (themeMode == ThemeMode.CUSTOM) {
                 SputnikCustomTheme custom = SputnikCustomTheme.get();
@@ -584,10 +635,10 @@ public final class SputnikNodeGraphPanel {
                 }
 
                 int finalColor = wireHovered ? SputnikCustomTheme.toImColor(custom.wireHoveredColor) : baseCol;
-                float thickness = wireHovered ? (custom.wireThickness + 1.0f) : custom.wireThickness;
+                float thickness = Math.max(1.0f, (wireHovered ? (custom.wireThickness + 1.0f) : custom.wireThickness) * zoom);
 
                 if (custom.wireShadow) {
-                    drawList.addBezierCubic(p1.x, p1.y + 2.0f, p1.x + dist, p1.y + 2.0f, p2.x - dist, p2.y + 2.0f, p2.x, p2.y + 2.0f, ImColor.rgba(0, 0, 0, 75), custom.wireShadowThickness);
+                    drawList.addBezierCubic(p1.x, p1.y + 2.0f * zoom, p1.x + dist, p1.y + 2.0f * zoom, p2.x - dist, p2.y + 2.0f * zoom, p2.x, p2.y + 2.0f * zoom, ImColor.rgba(0, 0, 0, 75), Math.max(1.0f, custom.wireShadowThickness * zoom));
                 }
 
                 drawList.addBezierCubic(p1.x, p1.y, p1.x + dist, p1.y, p2.x - dist, p2.y, p2.x, p2.y, finalColor, thickness);
@@ -607,13 +658,13 @@ public final class SputnikNodeGraphPanel {
                         int sparkCol = (custom.rainbowEnabled && custom.rainbowWires)
                                 ? custom.getRainbowColor(t, 0.9f)
                                 : (wireHovered ? ImColor.rgba(255, 255, 255, 240) : finalColor);
-                        drawList.addCircleFilled(px, py, 3.5f, sparkCol);
-                        drawList.addCircleFilled(px, py, 1.5f, ImColor.rgba(255, 255, 255, 240));
+                        drawList.addCircleFilled(px, py, Math.max(1.5f, 3.5f * zoom), sparkCol);
+                        drawList.addCircleFilled(px, py, Math.max(1.0f, 1.5f * zoom), ImColor.rgba(255, 255, 255, 240));
                     }
                 }
             } else if (themeMode == ThemeMode.OLDSCHOOL) {
                 int wireColor = wireHovered ? ImColor.rgba(120, 255, 180, 240) : ImColor.rgba(0, 255, 136, 170); // 0xAA00FF88
-                float thickness = wireHovered ? 2.5f : 1.5f;
+                float thickness = Math.max(1.0f, (wireHovered ? 2.5f : 1.5f) * zoom);
                 drawList.addBezierCubic(p1.x, p1.y, p1.x + dist, p1.y, p2.x - dist, p2.y, p2.x, p2.y, wireColor, thickness);
 
                 // Animated glowing pulse dot traveling along the curve
@@ -627,14 +678,14 @@ public final class SputnikNodeGraphPanel {
                     float inv = 1.0f - pulsePos;
                     float px = inv * inv * inv * p1.x + 3 * inv * inv * pulsePos * (p1.x + dist) + 3 * inv * pulsePos * pulsePos * (p2.x - dist) + pulsePos * pulsePos * pulsePos * p2.x;
                     float py = inv * inv * inv * p1.y + 3 * inv * inv * pulsePos * p1.y + 3 * inv * pulsePos * pulsePos * p2.y + pulsePos * pulsePos * pulsePos * p2.y;
-                    drawList.addCircleFilled(px, py, 3.5f, ImColor.rgba(0, 255, 136, 200));
-                    drawList.addCircleFilled(px, py, 1.5f, ImColor.rgba(255, 255, 255, 240));
+                    drawList.addCircleFilled(px, py, Math.max(1.5f, 3.5f * zoom), ImColor.rgba(0, 255, 136, 200));
+                    drawList.addCircleFilled(px, py, Math.max(1.0f, 1.5f * zoom), ImColor.rgba(255, 255, 255, 240));
                 }
             } else {
-                drawList.addBezierCubic(p1.x, p1.y + 2.0f, p1.x + dist, p1.y + 2.0f, p2.x - dist, p2.y + 2.0f, p2.x, p2.y + 2.0f, ImColor.rgba(0, 0, 0, 65), 3.8f);
+                drawList.addBezierCubic(p1.x, p1.y + 2.0f * zoom, p1.x + dist, p1.y + 2.0f * zoom, p2.x - dist, p2.y + 2.0f * zoom, p2.x, p2.y + 2.0f * zoom, ImColor.rgba(0, 0, 0, 65), Math.max(1.5f, 3.8f * zoom));
 
                 int finalColor = wireHovered ? ImColor.rgb(255, 255, 255) : linkColor;
-                float thickness = wireHovered ? 3.0f : 2.2f;
+                float thickness = Math.max(1.0f, (wireHovered ? 3.0f : 2.2f) * zoom);
                 drawList.addBezierCubic(p1.x, p1.y, p1.x + dist, p1.y, p2.x - dist, p2.y, p2.x, p2.y, finalColor, thickness);
             }
 
@@ -648,47 +699,48 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static boolean isMouseNearCubicBezier(float mx, float my, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4) {
+    private static boolean isMouseNearCubicBezier(float mx, float my, float x1, float y1, float x2, float y2, float x3, float y3, float x4, float y4, float zoom) {
+        float thresh = Math.max(25.0f, 49.0f * zoom * zoom);
         for (float t = 0.0f; t <= 1.0f; t += 0.1f) {
             float inv = 1.0f - t;
             float bx = inv * inv * inv * x1 + 3 * inv * inv * t * x2 + 3 * inv * t * t * x3 + t * t * t * x4;
             float by = inv * inv * inv * y1 + 3 * inv * inv * t * y2 + 3 * inv * t * t * y3 + t * t * t * y4;
-            if ((mx - bx) * (mx - bx) + (my - by) * (my - by) <= 49.0f) {
+            if ((mx - bx) * (mx - bx) + (my - by) * (my - by) <= thresh) {
                 return true;
             }
         }
         return false;
     }
 
-    private static void drawPendingLink(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io) {
+    private static void drawPendingLink(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io, float zoom) {
         if (dragFromNodeId == -1) return;
 
         float mx = io.getMousePosX();
         float my = io.getMousePosY();
-        float dist = Math.max(30.0f, Math.abs(mx - dragStartX) * 0.5f);
+        float dist = Math.max(30.0f * zoom, Math.abs(mx - dragStartX) * 0.5f);
 
         if (themeMode == ThemeMode.CUSTOM) {
             SputnikCustomTheme custom = SputnikCustomTheme.get();
             int linkCol = (custom.rainbowEnabled && custom.rainbowWires) ? custom.getRainbowColor(0.5f, 1.0f) : dragPinColor;
             if (custom.wireShadow) {
-                drawList.addBezierCubic(dragStartX, dragStartY + 2.0f, dragStartX + dist, dragStartY + 2.0f, mx - dist, my + 2.0f, mx, my + 2.0f, ImColor.rgba(0, 0, 0, 75), custom.wireShadowThickness);
+                drawList.addBezierCubic(dragStartX, dragStartY + 2.0f * zoom, dragStartX + dist, dragStartY + 2.0f * zoom, mx - dist, my + 2.0f * zoom, mx, my + 2.0f * zoom, ImColor.rgba(0, 0, 0, 75), Math.max(1.0f, custom.wireShadowThickness * zoom));
             }
-            drawList.addBezierCubic(dragStartX, dragStartY, dragStartX + dist, dragStartY, mx - dist, my, mx, my, linkCol, custom.wireThickness);
+            drawList.addBezierCubic(dragStartX, dragStartY, dragStartX + dist, dragStartY, mx - dist, my, mx, my, linkCol, Math.max(1.0f, custom.wireThickness * zoom));
         } else if (themeMode == ThemeMode.OLDSCHOOL) {
-            drawList.addBezierCubic(dragStartX, dragStartY, dragStartX + dist, dragStartY, mx - dist, my, mx, my, ImColor.rgba(255, 255, 255, 170), 1.5f); // 0xAAFFFFFF
+            drawList.addBezierCubic(dragStartX, dragStartY, dragStartX + dist, dragStartY, mx - dist, my, mx, my, ImColor.rgba(255, 255, 255, 170), Math.max(1.0f, 1.5f * zoom));
         } else {
-            drawList.addBezierCubic(dragStartX, dragStartY + 2.0f, dragStartX + dist, dragStartY + 2.0f, mx - dist, my + 2.0f, mx, my + 2.0f, ImColor.rgba(0, 0, 0, 75), 4.5f);
-            drawList.addBezierCubic(dragStartX, dragStartY, dragStartX + dist, dragStartY, mx - dist, my, mx, my, dragPinColor, 2.6f);
+            drawList.addBezierCubic(dragStartX, dragStartY + 2.0f * zoom, dragStartX + dist, dragStartY + 2.0f * zoom, mx - dist, my + 2.0f * zoom, mx, my + 2.0f * zoom, ImColor.rgba(0, 0, 0, 75), Math.max(1.5f, 4.5f * zoom));
+            drawList.addBezierCubic(dragStartX, dragStartY, dragStartX + dist, dragStartY, mx - dist, my, mx, my, dragPinColor, Math.max(1.0f, 2.6f * zoom));
         }
 
         if (!ImGui.isMouseDown(ImGuiMouseButton.Left)) {
-            checkLinkDrop(graph, originX, originY, mx, my);
+            checkLinkDrop(graph, originX, originY, mx, my, zoom);
             dragFromNodeId = -1;
             dragFromPinId = null;
         }
     }
 
-    private static void drawNodes(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io) {
+    private static void drawNodes(ImDrawList drawList, SputnikGraph graph, float originX, float originY, ImGuiIO io, float zoom) {
         float mouseX = io.getMousePosX();
         float mouseY = io.getMousePosY();
 
@@ -702,18 +754,20 @@ public final class SputnikNodeGraphPanel {
 
         for (int i = nodes.size() - 1; i >= 0; i--) {
             SputnikNode node = nodes.get(i);
-            float nx = originX + node.getX();
-            float ny = originY + node.getY();
-            float headerH = (themeMode == ThemeMode.OLDSCHOOL) ? 18.0f : ((themeMode == ThemeMode.CUSTOM) ? SputnikCustomTheme.get().nodeHeaderHeight : 24.0f);
-            float cornerRadius = (themeMode == ThemeMode.OLDSCHOOL) ? 0.0f : ((themeMode == ThemeMode.CUSTOM) ? SputnikCustomTheme.get().nodeRounding : 6.0f);
+            float nx = originX + node.getX() * zoom;
+            float ny = originY + node.getY() * zoom;
+            float nw = node.getWidth() * zoom;
+            float nh = node.getHeight() * zoom;
+            float headerH = ((themeMode == ThemeMode.OLDSCHOOL) ? 18.0f : ((themeMode == ThemeMode.CUSTOM) ? SputnikCustomTheme.get().nodeHeaderHeight : 24.0f)) * zoom;
+            float cornerRadius = ((themeMode == ThemeMode.OLDSCHOOL) ? 0.0f : ((themeMode == ThemeMode.CUSTOM) ? SputnikCustomTheme.get().nodeRounding : 6.0f)) * zoom;
 
-            boolean hovered = mouseX >= nx && mouseX <= nx + node.getWidth() && mouseY >= ny && mouseY <= ny + node.getHeight();
+            boolean hovered = mouseX >= nx && mouseX <= nx + nw && mouseY >= ny && mouseY <= ny + nh;
             if (hovered && hoveredNodeId == -1) {
                 hoveredNodeId = node.getId();
             }
 
-            boolean pinInteracted = handlePinInteractions(graph, node, originX, originY, mouseX, mouseY);
-            boolean widgetInteracted = isWidgetArea(node, nx, ny, headerH, mouseX, mouseY);
+            boolean pinInteracted = handlePinInteractions(graph, node, originX, originY, mouseX, mouseY, zoom);
+            boolean widgetInteracted = isWidgetArea(node, nx, ny, headerH, mouseX, mouseY, zoom);
 
             if (hovered) {
                 if (ImGui.isMouseClicked(ImGuiMouseButton.Left) || ImGui.isMouseClicked(ImGuiMouseButton.Right)) {
@@ -748,10 +802,10 @@ public final class SputnikNodeGraphPanel {
 
             if (themeMode == ThemeMode.CUSTOM) {
                 SputnikCustomTheme custom = SputnikCustomTheme.get();
-                drawList.addRectFilled(nx + 3.0f, ny + 4.0f, nx + node.getWidth() + 3.0f, ny + node.getHeight() + 5.0f, ImColor.rgba(0, 0, 0, 85), cornerRadius + 2.0f);
+                drawList.addRectFilled(nx + 3.0f * zoom, ny + 4.0f * zoom, nx + nw + 3.0f * zoom, ny + nh + 5.0f * zoom, ImColor.rgba(0, 0, 0, 85), cornerRadius + 2.0f * zoom);
 
                 int bodyCol = hovered ? SputnikCustomTheme.toImColor(custom.nodeBodyBgHovered) : SputnikCustomTheme.toImColor(custom.nodeBodyBg);
-                drawList.addRectFilled(nx, ny + headerH, nx + node.getWidth(), ny + node.getHeight(), bodyCol, cornerRadius, ImDrawFlags.RoundCornersBottom);
+                drawList.addRectFilled(nx, ny + headerH, nx + nw, ny + nh, bodyCol, cornerRadius, ImDrawFlags.RoundCornersBottom);
 
                 int headerCol;
                 if (custom.rainbowEnabled && custom.rainbowHeaders) {
@@ -763,14 +817,14 @@ public final class SputnikNodeGraphPanel {
                     headerCol = SputnikCustomTheme.toImColor(custom.nodeHeaderDefault);
                 }
 
-                drawList.addRectFilled(nx, ny, nx + node.getWidth(), ny + headerH, headerCol, cornerRadius, ImDrawFlags.RoundCornersTop);
-                drawList.addLine(nx, ny + headerH, nx + node.getWidth(), ny + headerH, ImColor.rgba(20, 22, 26, 180), 1.0f);
+                drawList.addRectFilled(nx, ny, nx + nw, ny + headerH, headerCol, cornerRadius, ImDrawFlags.RoundCornersTop);
+                drawList.addLine(nx, ny + headerH, nx + nw, ny + headerH, ImColor.rgba(20, 22, 26, 180), 1.0f);
 
                 int titleCol = SputnikCustomTheme.toImColor(custom.nodeTitleColor);
-                drawList.addText(nx + 12.0f, ny + (headerH * 0.5f) - 7.0f, titleCol, node.getTitle());
+                drawList.addText(nx + 12.0f * zoom, ny + (headerH * 0.5f) - 7.0f * zoom, titleCol, node.getTitle());
 
                 int customBorderCol = hovered ? SputnikCustomTheme.toImColor(custom.nodeHoveredBorderColor) : SputnikCustomTheme.toImColor(custom.nodeBorderColor);
-                drawList.addRect(nx, ny, nx + node.getWidth(), ny + node.getHeight(), customBorderCol, cornerRadius, ImDrawFlags.RoundCornersAll, custom.nodeBorderThickness);
+                drawList.addRect(nx, ny, nx + nw, ny + nh, customBorderCol, cornerRadius, ImDrawFlags.RoundCornersAll, Math.max(1.0f, custom.nodeBorderThickness * zoom));
 
                 if (isSelected) {
                     float breath = custom.getBreathingFactor();
@@ -785,61 +839,61 @@ public final class SputnikNodeGraphPanel {
                         glowCol = SputnikCustomTheme.toImColorWithAlpha(custom.nodeSelectedGlowColor, breath);
                     }
 
-                    float glowSpread = (custom.selectionOutlineThickness * 1.2f) * breath;
-                    drawList.addRect(nx - glowSpread, ny - glowSpread, nx + node.getWidth() + glowSpread, ny + node.getHeight() + glowSpread,
-                            glowCol, cornerRadius + glowSpread, ImDrawFlags.RoundCornersAll, custom.selectionOutlineThickness);
-                    drawList.addRect(nx - 1.0f, ny - 1.0f, nx + node.getWidth() + 1.0f, ny + node.getHeight() + 1.0f,
-                            selCol, cornerRadius + 1.0f, ImDrawFlags.RoundCornersAll, 1.2f);
+                    float glowSpread = (custom.selectionOutlineThickness * 1.2f) * breath * zoom;
+                    drawList.addRect(nx - glowSpread, ny - glowSpread, nx + nw + glowSpread, ny + nh + glowSpread,
+                            glowCol, cornerRadius + glowSpread, ImDrawFlags.RoundCornersAll, Math.max(1.0f, custom.selectionOutlineThickness * zoom));
+                    drawList.addRect(nx - 1.0f * zoom, ny - 1.0f * zoom, nx + nw + 1.0f * zoom, ny + nh + 1.0f * zoom,
+                            selCol, cornerRadius + 1.0f * zoom, ImDrawFlags.RoundCornersAll, Math.max(1.0f, 1.2f * zoom));
                 } else if (hovered) {
-                    drawList.addRect(nx - 1.5f, ny - 1.5f, nx + node.getWidth() + 1.5f, ny + node.getHeight() + 1.5f,
-                            customBorderCol, cornerRadius + 1.5f, ImDrawFlags.RoundCornersAll, custom.nodeBorderThickness + 0.6f);
+                    drawList.addRect(nx - 1.5f * zoom, ny - 1.5f * zoom, nx + nw + 1.5f * zoom, ny + nh + 1.5f * zoom,
+                            customBorderCol, cornerRadius + 1.5f * zoom, ImDrawFlags.RoundCornersAll, Math.max(1.0f, (custom.nodeBorderThickness + 0.6f) * zoom));
                 }
             } else if (themeMode == ThemeMode.OLDSCHOOL) {
                 // Sharp 2px offset shadow
-                drawList.addRectFilled(nx + 2.0f, ny + 2.0f, nx + node.getWidth() + 2.0f, ny + node.getHeight() + 2.0f, ImColor.rgba(0, 0, 0, 85));
+                drawList.addRectFilled(nx + 2.0f * zoom, ny + 2.0f * zoom, nx + nw + 2.0f * zoom, ny + nh + 2.0f * zoom, ImColor.rgba(0, 0, 0, 85));
 
                 // Sharp body
                 int bodyBgOld = hovered ? ImColor.rgba(37, 37, 37, 238) : ImColor.rgba(26, 26, 26, 221);
-                drawList.addRectFilled(nx, ny + headerH, nx + node.getWidth(), ny + node.getHeight(), bodyBgOld);
+                drawList.addRectFilled(nx, ny + headerH, nx + nw, ny + nh, bodyBgOld);
 
                 // Tinted header + 1px category line + category colored title
                 int catColor = getCategoryColor(node.getTypeId());
                 int headerBgOld = (catColor & 0x00FFFFFF) | 0x33000000;
-                drawList.addRectFilled(nx, ny, nx + node.getWidth(), ny + headerH, headerBgOld);
-                drawList.addLine(nx, ny + headerH - 1.0f, nx + node.getWidth(), ny + headerH - 1.0f, catColor, 1.0f);
-                drawList.addText(nx + 6.0f, ny + 2.0f, catColor, node.getTitle());
+                drawList.addRectFilled(nx, ny, nx + nw, ny + headerH, headerBgOld);
+                drawList.addLine(nx, ny + headerH - 1.0f, nx + nw, ny + headerH - 1.0f, catColor, 1.0f);
+                drawList.addText(nx + 6.0f * zoom, ny + 2.0f * zoom, catColor, node.getTitle());
 
-                // Outline (selected: white, hovered: light gray, normal: dark gray)
+                // Outline
                 int borderColOld = isSelected ? ImColor.rgb(255, 255, 255) : (hovered ? ImColor.rgb(170, 170, 170) : ImColor.rgb(68, 68, 68));
-                drawList.addRect(nx, ny, nx + node.getWidth(), ny + node.getHeight(), borderColOld, 0.0f, 0, 1.0f);
+                drawList.addRect(nx, ny, nx + nw, ny + nh, borderColOld, 0.0f, 0, 1.0f);
             } else {
-                drawList.addRectFilled(nx, ny + 3.0f, nx + node.getWidth(), ny + node.getHeight() + 6.0f, ImColor.rgba(0, 0, 0, 95), 8.0f);
-                drawList.addRectFilled(nx, ny + 1.0f, nx + node.getWidth(), ny + node.getHeight() + 3.0f, ImColor.rgba(0, 0, 0, 55), 7.0f);
+                drawList.addRectFilled(nx, ny + 3.0f * zoom, nx + nw, ny + nh + 6.0f * zoom, ImColor.rgba(0, 0, 0, 95), 8.0f * zoom);
+                drawList.addRectFilled(nx, ny + 1.0f * zoom, nx + nw, ny + nh + 3.0f * zoom, ImColor.rgba(0, 0, 0, 55), 7.0f * zoom);
 
                 int bodyCol = hovered ? ImColor.rgba(44, 44, 47, 252) : bodyBg;
-                drawList.addRectFilled(nx, ny + headerH, nx + node.getWidth(), ny + node.getHeight(), bodyCol, cornerRadius, ImDrawFlags.RoundCornersBottom);
+                drawList.addRectFilled(nx, ny + headerH, nx + nw, ny + nh, bodyCol, cornerRadius, ImDrawFlags.RoundCornersBottom);
 
                 int headerCol = getHeaderColor(node.getTypeId());
-                drawList.addRectFilled(nx, ny, nx + node.getWidth(), ny + headerH, headerCol, cornerRadius, ImDrawFlags.RoundCornersTop);
-                drawList.addLine(nx, ny + headerH, nx + node.getWidth(), ny + headerH, ImColor.rgba(18, 18, 20, 220), 1.0f);
-                drawList.addText(nx + 8.0f, ny + 4.0f, 0xFFFFFFFF, "v  " + node.getTitle());
+                drawList.addRectFilled(nx, ny, nx + nw, ny + headerH, headerCol, cornerRadius, ImDrawFlags.RoundCornersTop);
+                drawList.addLine(nx, ny + headerH, nx + nw, ny + headerH, ImColor.rgba(18, 18, 20, 220), 1.0f);
+                drawList.addText(nx + 8.0f * zoom, ny + 4.0f * zoom, 0xFFFFFFFF, "v  " + node.getTitle());
 
-                drawList.addRect(nx, ny, nx + node.getWidth(), ny + node.getHeight(), borderCol, cornerRadius, ImDrawFlags.RoundCornersAll, 1.0f);
+                drawList.addRect(nx, ny, nx + nw, ny + nh, borderCol, cornerRadius, ImDrawFlags.RoundCornersAll, 1.0f);
 
                 if (isSelected) {
-                    drawList.addRect(nx - 2.5f, ny - 2.5f, nx + node.getWidth() + 2.5f, ny + node.getHeight() + 2.5f,
-                            ImColor.rgba(235, 125, 35, 160), cornerRadius + 2.5f, ImDrawFlags.RoundCornersAll, 2.0f);
-                    drawList.addRect(nx - 1.0f, ny - 1.0f, nx + node.getWidth() + 1.0f, ny + node.getHeight() + 1.0f,
-                            ImColor.rgb(255, 255, 255), cornerRadius + 1.0f, ImDrawFlags.RoundCornersAll, 1.4f);
+                    drawList.addRect(nx - 2.5f * zoom, ny - 2.5f * zoom, nx + nw + 2.5f * zoom, ny + nh + 2.5f * zoom,
+                            ImColor.rgba(235, 125, 35, 160), cornerRadius + 2.5f * zoom, ImDrawFlags.RoundCornersAll, Math.max(1.0f, 2.0f * zoom));
+                    drawList.addRect(nx - 1.0f * zoom, ny - 1.0f * zoom, nx + nw + 1.0f * zoom, ny + nh + 1.0f * zoom,
+                            ImColor.rgb(255, 255, 255), cornerRadius + 1.0f * zoom, ImDrawFlags.RoundCornersAll, Math.max(1.0f, 1.4f * zoom));
                 } else if (hovered) {
-                    drawList.addRect(nx - 1.0f, ny - 1.0f, nx + node.getWidth() + 1.0f, ny + node.getHeight() + 1.0f,
-                            ImColor.rgba(160, 160, 165, 220), cornerRadius + 1.0f, ImDrawFlags.RoundCornersAll, 1.2f);
+                    drawList.addRect(nx - 1.0f * zoom, ny - 1.0f * zoom, nx + nw + 1.0f * zoom, ny + nh + 1.0f * zoom,
+                            ImColor.rgba(160, 160, 165, 220), cornerRadius + 1.0f * zoom, ImDrawFlags.RoundCornersAll, Math.max(1.0f, 1.2f * zoom));
                 }
             }
 
-            drawNodeContent(drawList, node, nx, ny, headerH);
+            drawNodeContent(drawList, node, nx, ny, nw, nh, headerH, zoom);
 
-            renderPins(drawList, graph, node, originX, originY, mouseX, mouseY);
+            renderPins(drawList, graph, node, originX, originY, mouseX, mouseY, zoom);
         }
 
         if (nodeToDeleteWithMMB != -1) {
@@ -858,28 +912,28 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static boolean isWidgetArea(SputnikNode node, float nx, float ny, float headerH, float mouseX, float mouseY) {
+    private static boolean isWidgetArea(SputnikNode node, float nx, float ny, float headerH, float mouseX, float mouseY, float zoom) {
         String typeId = node.getTypeId();
         boolean isOld = (themeMode == ThemeMode.OLDSCHOOL);
         if ("constant_number".equals(typeId) || "constant_string".equals(typeId) || "constant_boolean".equals(typeId)) {
-            float boxX = nx + 10.0f;
-            float boxY = ny + headerH + (isOld ? 8.0f : 12.0f);
-            float boxW = node.getWidth() - 28.0f;
-            float boxH = 26.0f;
+            float boxX = nx + 10.0f * zoom;
+            float boxY = ny + headerH + (isOld ? 8.0f : 12.0f) * zoom;
+            float boxW = (node.getWidth() - 28.0f) * zoom;
+            float boxH = 26.0f * zoom;
             return mouseX >= boxX && mouseX <= boxX + boxW && mouseY >= boxY && mouseY <= boxY + boxH;
         }
         if ("sputnik_link".equals(typeId) || "satellite_comms".equals(typeId)) {
-            float boxX = nx + 34.0f;
-            float boxY = ny + headerH + (isOld ? 4.0f : 6.0f);
-            float boxW = 55.0f;
-            float boxH = 20.0f;
+            float boxX = nx + 34.0f * zoom;
+            float boxY = ny + headerH + (isOld ? 4.0f : 6.0f) * zoom;
+            float boxW = 55.0f * zoom;
+            float boxH = 20.0f * zoom;
             return mouseX >= boxX && mouseX <= boxX + boxW && mouseY >= boxY && mouseY <= boxY + boxH;
         }
         if (isEngineNode(typeId)) {
-            float boxX = nx + 32.0f;
-            float boxY = ny + headerH + (isOld ? 4.0f : 6.0f);
-            float boxW = 46.0f;
-            float boxH = 20.0f;
+            float boxX = nx + 32.0f * zoom;
+            float boxY = ny + headerH + (isOld ? 4.0f : 6.0f) * zoom;
+            float boxW = 46.0f * zoom;
+            float boxH = 20.0f * zoom;
             return mouseX >= boxX && mouseX <= boxX + boxW && mouseY >= boxY && mouseY <= boxY + boxH;
         }
         return false;
@@ -893,88 +947,111 @@ public final class SputnikNodeGraphPanel {
         return handler != null && "Actuators".equals(handler.getCategory());
     }
 
-    private static void drawNodeContent(ImDrawList drawList, SputnikNode node, float nx, float ny, float headerH) {
+    private static void drawNodeContent(ImDrawList drawList, SputnikNode node, float nx, float ny, float nw, float nh, float headerH, float zoom) {
         String typeId = node.getTypeId();
         boolean isOld = (themeMode == ThemeMode.OLDSCHOOL);
         if (isOld) {
             ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.FrameRounding, 0.0f);
         } else if (themeMode == ThemeMode.CUSTOM) {
-            ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.FrameRounding, SputnikCustomTheme.get().frameRounding);
+            ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.FrameRounding, SputnikCustomTheme.get().frameRounding * zoom);
         } else {
-            ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.FrameRounding, 3.0f);
+            ImGui.pushStyleVar(imgui.flag.ImGuiStyleVar.FrameRounding, 3.0f * zoom);
         }
 
         try {
             if ("constant_number".equals(typeId)) {
-                float boxX = nx + 10.0f;
-                float boxY = ny + headerH + (isOld ? 8.0f : 12.0f);
-                float boxW = node.getWidth() - 28.0f;
+                float boxX = nx + 10.0f * zoom;
+                float boxY = ny + headerH + (isOld ? 8.0f : 12.0f) * zoom;
+                float boxW = nw - 28.0f * zoom;
 
-                ImGui.setCursorScreenPos(boxX, boxY);
-                ImGui.pushItemWidth(boxW);
-                ImDouble val = new ImDouble(node.getCustomNumber());
-                if (ImGui.inputDouble("##num_" + node.getId(), val, 0.0, 0.0, "%.3f")) {
-                    node.setCustomNumber(val.get());
+                if (zoom >= 0.55f) {
+                    ImGui.setCursorScreenPos(boxX, boxY);
+                    ImGui.pushItemWidth(boxW);
+                    ImDouble val = new ImDouble(node.getCustomNumber());
+                    if (ImGui.inputDouble("##num_" + node.getId(), val, 0.0, 0.0, "%.3f")) {
+                        node.setCustomNumber(val.get());
+                    }
+                    ImGui.popItemWidth();
+                } else {
+                    float boxH = 22.0f * zoom;
+                    drawList.addRectFilled(boxX, boxY, boxX + boxW, boxY + boxH, ImColor.rgba(15, 18, 22, 220));
+                    drawList.addRect(boxX, boxY, boxX + boxW, boxY + boxH, ImColor.rgba(50, 60, 70, 200));
+                    drawList.addText(boxX + 4.0f * zoom, boxY + 3.0f * zoom, 0xFFFFFFFF, String.format(Locale.ROOT, "%.3f", node.getCustomNumber()));
                 }
-                ImGui.popItemWidth();
             } else if ("constant_string".equals(typeId)) {
-                float boxX = nx + 10.0f;
-                float boxY = ny + headerH + (isOld ? 8.0f : 12.0f);
-                float boxW = node.getWidth() - 28.0f;
+                float boxX = nx + 10.0f * zoom;
+                float boxY = ny + headerH + (isOld ? 8.0f : 12.0f) * zoom;
+                float boxW = nw - 28.0f * zoom;
 
-                ImGui.setCursorScreenPos(boxX, boxY);
-                ImGui.pushItemWidth(boxW);
-                ImString imStr = new ImString(node.getCustomString(), 256);
-                if (ImGui.inputText("##str_" + node.getId(), imStr)) {
-                    node.setCustomString(imStr.get());
+                if (zoom >= 0.55f) {
+                    ImGui.setCursorScreenPos(boxX, boxY);
+                    ImGui.pushItemWidth(boxW);
+                    ImString imStr = new ImString(node.getCustomString(), 256);
+                    if (ImGui.inputText("##str_" + node.getId(), imStr)) {
+                        node.setCustomString(imStr.get());
+                    }
+                    ImGui.popItemWidth();
+                } else {
+                    float boxH = 22.0f * zoom;
+                    drawList.addRectFilled(boxX, boxY, boxX + boxW, boxY + boxH, ImColor.rgba(15, 18, 22, 220));
+                    drawList.addRect(boxX, boxY, boxX + boxW, boxY + boxH, ImColor.rgba(50, 60, 70, 200));
+                    drawList.addText(boxX + 4.0f * zoom, boxY + 3.0f * zoom, 0xFFFFFFFF, node.getCustomString());
                 }
-                ImGui.popItemWidth();
             } else if ("constant_boolean".equals(typeId)) {
-                float boxX = nx + 10.0f;
-                float boxY = ny + headerH + (isOld ? 8.0f : 12.0f);
-                float boxW = node.getWidth() - 28.0f;
-                float boxH = 26.0f;
+                float boxX = nx + 10.0f * zoom;
+                float boxY = ny + headerH + (isOld ? 8.0f : 12.0f) * zoom;
+                float boxW = nw - 28.0f * zoom;
+                float boxH = 26.0f * zoom;
 
-                ImGui.setCursorScreenPos(boxX, boxY);
                 boolean b = node.getCustomNumber() > 0.5;
                 int col = b ? ImColor.rgb(40, 130, 60) : ImColor.rgb(130, 40, 40);
-                ImGui.pushStyleColor(imgui.flag.ImGuiCol.Button, col);
-                if (ImGui.button((b ? "TRUE" : "FALSE") + "##bool_" + node.getId(), boxW, boxH)) {
-                    node.setCustomNumber(b ? 0.0 : 1.0);
-                }
-                ImGui.popStyleColor();
-            } else if ("display".equals(typeId) || "display_bridge".equals(typeId) || "visualizer".equals(typeId)) {
-                float lcdX = nx + 34.0f;
-                float lcdY = ny + headerH + (isOld ? 8.0f : 13.0f);
-                float lcdW = node.getWidth() - 46.0f;
-                float lcdH = 26.0f;
 
-                float rounding = isOld ? 0.0f : 4.0f;
+                if (zoom >= 0.55f) {
+                    ImGui.setCursorScreenPos(boxX, boxY);
+                    ImGui.pushStyleColor(imgui.flag.ImGuiCol.Button, col);
+                    if (ImGui.button((b ? "TRUE" : "FALSE") + "##bool_" + node.getId(), boxW, boxH)) {
+                        node.setCustomNumber(b ? 0.0 : 1.0);
+                    }
+                    ImGui.popStyleColor();
+                } else {
+                    drawList.addRectFilled(boxX, boxY, boxX + boxW, boxY + boxH, col);
+                    drawList.addText(boxX + 4.0f * zoom, boxY + 3.0f * zoom, 0xFFFFFFFF, b ? "TRUE" : "FALSE");
+                }
+            } else if ("display".equals(typeId) || "display_bridge".equals(typeId) || "visualizer".equals(typeId)) {
+                float lcdX = nx + 34.0f * zoom;
+                float lcdY = ny + headerH + (isOld ? 8.0f : 13.0f) * zoom;
+                float lcdW = nw - 46.0f * zoom;
+                float lcdH = 26.0f * zoom;
+
+                float rounding = isOld ? 0.0f : 4.0f * zoom;
                 drawList.addRectFilled(lcdX, lcdY, lcdX + lcdW, lcdY + lcdH, ImColor.rgba(10, 16, 14, 255), rounding);
                 drawList.addRect(lcdX, lcdY, lcdX + lcdW, lcdY + lcdH, ImColor.rgba(25, 55, 45, 255), rounding);
 
                 String val = node.getCustomString();
                 if (val == null || val.isEmpty() || "---".equals(val)) {
-                    drawList.addText(lcdX + 8.0f, lcdY + 5.0f, ImColor.rgba(110, 125, 120, 180), "[ NO INPUT ]");
+                    drawList.addText(lcdX + 8.0f * zoom, lcdY + 5.0f * zoom, ImColor.rgba(110, 125, 120, 180), "[ NO INPUT ]");
                 } else {
-                    drawList.addText(lcdX + 8.0f, lcdY + 5.0f, ImColor.rgb(65, 240, 130), val);
+                    drawList.addText(lcdX + 8.0f * zoom, lcdY + 5.0f * zoom, ImColor.rgb(65, 240, 130), val);
                 }
             } else if ("sputnik_link".equals(typeId)) {
-                float topY = ny + headerH + (isOld ? 4.0f : 6.0f);
+                float topY = ny + headerH + (isOld ? 4.0f : 6.0f) * zoom;
 
                 // Draw "ID:" label
-                drawList.addText(nx + 12.0f, topY + 2.0f, ImColor.rgb(180, 190, 200), "ID:");
+                drawList.addText(nx + 12.0f * zoom, topY + 2.0f * zoom, ImColor.rgb(180, 190, 200), "ID:");
 
-                // Draw input box
-                float inputX = nx + 34.0f;
-                float inputW = 55.0f;
-                ImGui.setCursorScreenPos(inputX, topY);
-                ImGui.pushItemWidth(inputW);
-                imgui.type.ImInt linkId = new imgui.type.ImInt((int) Math.round(node.getCustomNumber()));
-                if (ImGui.inputInt("##link_" + node.getId(), linkId, 0, 0)) {
-                    node.setCustomNumber(Math.max(1, linkId.get()));
+                float inputX = nx + 34.0f * zoom;
+                float inputW = 55.0f * zoom;
+                if (zoom >= 0.55f) {
+                    ImGui.setCursorScreenPos(inputX, topY);
+                    ImGui.pushItemWidth(inputW);
+                    imgui.type.ImInt linkId = new imgui.type.ImInt((int) Math.round(node.getCustomNumber()));
+                    if (ImGui.inputInt("##link_" + node.getId(), linkId, 0, 0)) {
+                        node.setCustomNumber(Math.max(1, linkId.get()));
+                    }
+                    ImGui.popItemWidth();
+                } else {
+                    drawList.addText(inputX + 2.0f * zoom, topY + 2.0f * zoom, 0xFFFFFFFF, "#" + (int) Math.round(node.getCustomNumber()));
                 }
-                ImGui.popItemWidth();
 
                 // Draw status badge on the right
                 int id = (int) Math.round(node.getCustomNumber());
@@ -984,49 +1061,49 @@ public final class SputnikNodeGraphPanel {
                         : dev.devce.rocketnautics.content.blocks.sputnik_link.SputnikLinkManager.getReceivedSignal(id);
                 String status = (isReceiver ? "RX: " : "TX: ") + sig + "/15";
 
-                float badgeX = nx + 98.0f;
-                float badgeW = node.getWidth() - 108.0f;
-                float rounding = isOld ? 0.0f : 4.0f;
-                drawList.addRectFilled(badgeX, topY, badgeX + badgeW, topY + 20.0f,
+                float badgeX = nx + 98.0f * zoom;
+                float badgeW = nw - 108.0f * zoom;
+                float rounding = isOld ? 0.0f : 4.0f * zoom;
+                drawList.addRectFilled(badgeX, topY, badgeX + badgeW, topY + 20.0f * zoom,
                         isReceiver ? ImColor.rgba(20, 60, 35, 200) : ImColor.rgba(65, 45, 15, 200), rounding);
-                drawList.addRect(badgeX, topY, badgeX + badgeW, topY + 20.0f,
+                drawList.addRect(badgeX, topY, badgeX + badgeW, topY + 20.0f * zoom,
                         isReceiver ? ImColor.rgba(50, 180, 90, 220) : ImColor.rgba(200, 140, 40, 220), rounding);
-                drawList.addText(badgeX + 6.0f, topY + 2.0f,
+                drawList.addText(badgeX + 6.0f * zoom, topY + 2.0f * zoom,
                         isReceiver ? ImColor.rgb(100, 240, 140) : ImColor.rgb(255, 200, 80), status);
 
                 // Subtle divider line between settings and pins
-                float divY = topY + 24.0f;
-                drawList.addLine(nx + 8.0f, divY, nx + node.getWidth() - 8.0f, divY, ImColor.rgba(255, 255, 255, 30), 1.0f);
+                float divY = topY + 24.0f * zoom;
+                drawList.addLine(nx + 8.0f * zoom, divY, nx + nw - 8.0f * zoom, divY, ImColor.rgba(255, 255, 255, 30), 1.0f);
             } else if ("satellite_comms".equals(typeId)) {
-                float topY = ny + headerH + (isOld ? 4.0f : 6.0f);
+                float topY = ny + headerH + (isOld ? 4.0f : 6.0f) * zoom;
 
-                // Draw "CH:" label
-                drawList.addText(nx + 10.0f, topY + 2.0f, ImColor.rgb(180, 190, 200), "CH:");
+                drawList.addText(nx + 10.0f * zoom, topY + 2.0f * zoom, ImColor.rgb(180, 190, 200), "CH:");
 
-                // Draw input box
-                float inputX = nx + 32.0f;
-                float inputW = 50.0f;
-                ImGui.setCursorScreenPos(inputX, topY);
-                ImGui.pushItemWidth(inputW);
-                imgui.type.ImInt chVal = new imgui.type.ImInt((int) Math.round(node.getCustomNumber()));
-                if (ImGui.inputInt("##ch_" + node.getId(), chVal, 0, 0)) {
-                    node.setCustomNumber(Math.max(1, chVal.get()));
+                float inputX = nx + 32.0f * zoom;
+                float inputW = 50.0f * zoom;
+                if (zoom >= 0.55f) {
+                    ImGui.setCursorScreenPos(inputX, topY);
+                    ImGui.pushItemWidth(inputW);
+                    imgui.type.ImInt chVal = new imgui.type.ImInt((int) Math.round(node.getCustomNumber()));
+                    if (ImGui.inputInt("##ch_" + node.getId(), chVal, 0, 0)) {
+                        node.setCustomNumber(Math.max(1, chVal.get()));
+                    }
+                    ImGui.popItemWidth();
+                } else {
+                    drawList.addText(inputX + 2.0f * zoom, topY + 2.0f * zoom, 0xFFFFFFFF, "#" + (int) Math.round(node.getCustomNumber()));
                 }
-                ImGui.popItemWidth();
 
-                // Status badge on the right
                 int ch = (int) Math.round(node.getCustomNumber());
                 var packet = dev.devce.rocketnautics.content.sputnik.comms.SputnikCommsManager.peek(ch);
                 String status;
                 int badgeBg;
                 int badgeBorder;
                 int textColor;
-
                 if (packet != null) {
-                    if (currentSputnikId > 0 && packet.senderSputnikId == currentSputnikId) {
+                    if (packet.senderSputnikId == currentSputnikId) {
                         status = String.format(Locale.ROOT, "TX: %.1f", packet.data);
-                        badgeBg = ImColor.rgba(20, 45, 75, 200);
-                        badgeBorder = ImColor.rgba(45, 120, 210, 220);
+                        badgeBg = ImColor.rgba(20, 45, 65, 200);
+                        badgeBorder = ImColor.rgba(40, 120, 180, 220);
                         textColor = ImColor.rgb(95, 185, 255);
                     } else {
                         status = String.format(Locale.ROOT, "RX #%d: %.1f", packet.senderSputnikId, packet.data);
@@ -1041,29 +1118,33 @@ public final class SputnikNodeGraphPanel {
                     textColor = ImColor.rgb(150, 155, 165);
                 }
 
-                float badgeX = nx + 88.0f;
-                float badgeW = node.getWidth() - 98.0f;
-                float rounding = isOld ? 0.0f : 4.0f;
-                drawList.addRectFilled(badgeX, topY, badgeX + badgeW, topY + 20.0f, badgeBg, rounding);
-                drawList.addRect(badgeX, topY, badgeX + badgeW, topY + 20.0f, badgeBorder, rounding);
-                drawList.addText(badgeX + 6.0f, topY + 2.0f, textColor, status);
+                float badgeX = nx + 88.0f * zoom;
+                float badgeW = nw - 98.0f * zoom;
+                float rounding = isOld ? 0.0f : 4.0f * zoom;
+                drawList.addRectFilled(badgeX, topY, badgeX + badgeW, topY + 20.0f * zoom, badgeBg, rounding);
+                drawList.addRect(badgeX, topY, badgeX + badgeW, topY + 20.0f * zoom, badgeBorder, rounding);
+                drawList.addText(badgeX + 6.0f * zoom, topY + 2.0f * zoom, textColor, status);
 
-                float divY = topY + 24.0f;
-                drawList.addLine(nx + 8.0f, divY, nx + node.getWidth() - 8.0f, divY, ImColor.rgba(255, 255, 255, 30), 1.0f);
+                float divY = topY + 24.0f * zoom;
+                drawList.addLine(nx + 8.0f * zoom, divY, nx + nw - 8.0f * zoom, divY, ImColor.rgba(255, 255, 255, 30), 1.0f);
             } else if (isEngineNode(typeId)) {
-                float topY = ny + headerH + (isOld ? 4.0f : 6.0f);
+                float topY = ny + headerH + (isOld ? 4.0f : 6.0f) * zoom;
 
-                drawList.addText(nx + 12.0f, topY + 2.0f, ImColor.rgb(180, 190, 200), "ID:");
+                drawList.addText(nx + 12.0f * zoom, topY + 2.0f * zoom, ImColor.rgb(180, 190, 200), "ID:");
 
-                float inputX = nx + 32.0f;
-                float inputW = 46.0f;
-                ImGui.setCursorScreenPos(inputX, topY);
-                ImGui.pushItemWidth(inputW);
-                imgui.type.ImInt engId = new imgui.type.ImInt((int) Math.round(node.getCustomNumber()));
-                if (ImGui.inputInt("##eng_" + node.getId(), engId, 0, 0)) {
-                    node.setCustomNumber(Math.max(0, engId.get()));
+                float inputX = nx + 32.0f * zoom;
+                float inputW = 46.0f * zoom;
+                if (zoom >= 0.55f) {
+                    ImGui.setCursorScreenPos(inputX, topY);
+                    ImGui.pushItemWidth(inputW);
+                    imgui.type.ImInt engId = new imgui.type.ImInt((int) Math.round(node.getCustomNumber()));
+                    if (ImGui.inputInt("##eng_" + node.getId(), engId, 0, 0)) {
+                        node.setCustomNumber(Math.max(0, engId.get()));
+                    }
+                    ImGui.popItemWidth();
+                } else {
+                    drawList.addText(inputX + 2.0f * zoom, topY + 2.0f * zoom, 0xFFFFFFFF, "#" + (int) Math.round(node.getCustomNumber()));
                 }
-                ImGui.popItemWidth();
 
                 int id = (int) Math.round(node.getCustomNumber());
                 String status = "gyrodyne_control".equals(typeId) ? ("GYRO #" + id) : ("ENG #" + id);
@@ -1099,84 +1180,86 @@ public final class SputnikNodeGraphPanel {
                     }
                 }
 
-                float badgeX = nx + 84.0f;
-                float badgeW = node.getWidth() - 92.0f;
-                float rounding = isOld ? 0.0f : 4.0f;
-                drawList.addRectFilled(badgeX, topY, badgeX + badgeW, topY + 20.0f, badgeBg, rounding);
-                drawList.addRect(badgeX, topY, badgeX + badgeW, topY + 20.0f, badgeBorder, rounding);
+                float badgeX = nx + 84.0f * zoom;
+                float badgeW = nw - 92.0f * zoom;
+                float rounding = isOld ? 0.0f : 4.0f * zoom;
+                drawList.addRectFilled(badgeX, topY, badgeX + badgeW, topY + 20.0f * zoom, badgeBg, rounding);
+                drawList.addRect(badgeX, topY, badgeX + badgeW, topY + 20.0f * zoom, badgeBorder, rounding);
 
-                float maxTextW = badgeW - 10.0f;
+                float maxTextW = badgeW - 10.0f * zoom;
                 String displayStatus = status;
-                if (status.length() * 7.2f > maxTextW) {
+                if (status.length() * 7.2f * zoom > maxTextW) {
                     if (status.endsWith(" [ON]") || status.endsWith(" [OFF]")) {
                         String suffix = status.substring(status.length() - 6);
-                        int avail = Math.max(1, (int) Math.floor((maxTextW - 6 * 7.2f - 3 * 7.2f) / 7.2f));
+                        int avail = Math.max(1, (int) Math.floor((maxTextW - 6 * 7.2f * zoom - 3 * 7.2f * zoom) / (7.2f * zoom)));
                         displayStatus = status.substring(0, Math.min(avail, status.length() - 6)) + "..." + suffix;
                     } else {
-                        int maxChars = Math.max(4, (int) Math.floor((maxTextW - 3 * 7.2f) / 7.2f));
+                        int maxChars = Math.max(4, (int) Math.floor((maxTextW - 3 * 7.2f * zoom) / (7.2f * zoom)));
                         displayStatus = status.substring(0, Math.min(maxChars, status.length())) + "...";
                     }
                 }
-                drawList.addText(badgeX + 5.0f, topY + 2.0f, textColor, displayStatus);
+                drawList.addText(badgeX + 5.0f * zoom, topY + 2.0f * zoom, textColor, displayStatus);
 
-                float divY = topY + 24.0f;
-                drawList.addLine(nx + 8.0f, divY, nx + node.getWidth() - 8.0f, divY, ImColor.rgba(255, 255, 255, 30), 1.0f);
+                float divY = topY + 24.0f * zoom;
+                drawList.addLine(nx + 8.0f * zoom, divY, nx + nw - 8.0f * zoom, divY, ImColor.rgba(255, 255, 255, 30), 1.0f);
             }
         } finally {
             ImGui.popStyleVar();
         }
     }
 
-    private static float getPinPosX(SputnikNode node, SputnikPin pin, boolean isInput, float originX) {
-        float nx = originX + node.getX();
+    private static float getPinPosX(SputnikNode node, SputnikPin pin, boolean isInput, float originX, float zoom) {
+        float nx = originX + node.getX() * zoom;
+        float nw = node.getWidth() * zoom;
         if (themeMode == ThemeMode.OLDSCHOOL) {
-            return isInput ? nx : (nx + node.getWidth());
+            return isInput ? nx : (nx + nw);
         }
         String typeId = node.getTypeId();
         if ("constant_number".equals(typeId) || "constant_string".equals(typeId) || "constant_boolean".equals(typeId)) {
-            return nx + node.getWidth();
+            return nx + nw;
         }
         if ("display".equals(typeId) || "display_bridge".equals(typeId) || "visualizer".equals(typeId)) {
             return nx;
         }
-        return isInput ? nx : (nx + node.getWidth());
+        return isInput ? nx : (nx + nw);
     }
 
-    private static float getPinPosY(SputnikNode node, int pinIndex, float originY) {
-        float ny = originY + node.getY();
-        float headerH = (themeMode == ThemeMode.OLDSCHOOL) ? 18.0f : ((themeMode == ThemeMode.CUSTOM) ? SputnikCustomTheme.get().nodeHeaderHeight : 24.0f);
+    private static float getPinPosY(SputnikNode node, int pinIndex, float originY, float zoom) {
+        float ny = originY + node.getY() * zoom;
+        float headerH = ((themeMode == ThemeMode.OLDSCHOOL) ? 18.0f : ((themeMode == ThemeMode.CUSTOM) ? SputnikCustomTheme.get().nodeHeaderHeight : 24.0f)) * zoom;
         String typeId = node.getTypeId();
         if (themeMode == ThemeMode.OLDSCHOOL) {
             if ("constant_number".equals(typeId) || "constant_string".equals(typeId) || "constant_boolean".equals(typeId)
                     || "display".equals(typeId) || "display_bridge".equals(typeId) || "visualizer".equals(typeId)) {
-                return ny + headerH + 20.0f;
+                return ny + headerH + 20.0f * zoom;
             }
             if ("sputnik_link".equals(typeId) || "satellite_comms".equals(typeId) || isEngineNode(typeId)) {
-                return ny + headerH + 34.0f + (pinIndex * 18.0f);
+                return ny + headerH + (34.0f + (pinIndex * 18.0f)) * zoom;
             }
-            return ny + headerH + 14.0f + (pinIndex * 18.0f);
+            return ny + headerH + (14.0f + (pinIndex * 18.0f)) * zoom;
         }
 
         if ("constant_number".equals(typeId) || "constant_string".equals(typeId) || "constant_boolean".equals(typeId)
                 || "display".equals(typeId) || "display_bridge".equals(typeId) || "visualizer".equals(typeId)) {
-            return ny + headerH + 24.0f;
+            return ny + headerH + 24.0f * zoom;
         }
         if ("sputnik_link".equals(typeId) || "satellite_comms".equals(typeId) || isEngineNode(typeId)) {
-            return ny + headerH + 36.0f + (pinIndex * 22.0f);
+            return ny + headerH + (36.0f + (pinIndex * 22.0f)) * zoom;
         }
-        return ny + headerH + 16.0f + (pinIndex * 22.0f);
+        return ny + headerH + (16.0f + (pinIndex * 22.0f)) * zoom;
     }
 
-    private static boolean handlePinInteractions(SputnikGraph graph, SputnikNode node, float originX, float originY, float mouseX, float mouseY) {
+    private static boolean handlePinInteractions(SputnikGraph graph, SputnikNode node, float originX, float originY, float mouseX, float mouseY, float zoom) {
         boolean interacted = false;
+        float hitDistSq = Math.max(36.0f, 64.0f * zoom * zoom);
 
         List<SputnikPin> inputs = node.getInputs();
         for (int p = 0; p < inputs.size(); p++) {
             SputnikPin pin = inputs.get(p);
-            float pinX = getPinPosX(node, pin, true, originX);
-            float pinY = getPinPosY(node, p, originY);
+            float pinX = getPinPosX(node, pin, true, originX, zoom);
+            float pinY = getPinPosY(node, p, originY, zoom);
 
-            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= 64.0f;
+            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= hitDistSq;
             if (pinHovered) {
                 interacted = true;
                 if (ImGui.isMouseClicked(ImGuiMouseButton.Right) || ImGui.isMouseClicked(ImGuiMouseButton.Middle)) {
@@ -1188,10 +1271,10 @@ public final class SputnikNodeGraphPanel {
         List<SputnikPin> outputs = node.getOutputs();
         for (int p = 0; p < outputs.size(); p++) {
             SputnikPin pin = outputs.get(p);
-            float pinX = getPinPosX(node, pin, false, originX);
-            float pinY = getPinPosY(node, p, originY);
+            float pinX = getPinPosX(node, pin, false, originX, zoom);
+            float pinY = getPinPosY(node, p, originY, zoom);
 
-            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= 64.0f;
+            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= hitDistSq;
             if (pinHovered) {
                 interacted = true;
                 if (ImGui.isMouseClicked(ImGuiMouseButton.Left)) {
@@ -1210,30 +1293,30 @@ public final class SputnikNodeGraphPanel {
         return interacted;
     }
 
-    private static void renderPins(ImDrawList drawList, SputnikGraph graph, SputnikNode node, float originX, float originY, float mouseX, float mouseY) {
+    private static void renderPins(ImDrawList drawList, SputnikGraph graph, SputnikNode node, float originX, float originY, float mouseX, float mouseY, float zoom) {
         String typeId = node.getTypeId();
         boolean isConstant = "constant_number".equals(typeId) || "constant_string".equals(typeId) || "constant_boolean".equals(typeId);
         boolean isDisplay = "display".equals(typeId) || "display_bridge".equals(typeId) || "visualizer".equals(typeId);
         boolean isOld = (themeMode == ThemeMode.OLDSCHOOL);
+        float hitDistSq = Math.max(36.0f, 64.0f * zoom * zoom);
 
         List<SputnikPin> inputs = node.getInputs();
         for (int p = 0; p < inputs.size(); p++) {
             SputnikPin pin = inputs.get(p);
-            float pinX = getPinPosX(node, pin, true, originX);
-            float pinY = getPinPosY(node, p, originY);
+            float pinX = getPinPosX(node, pin, true, originX, zoom);
+            float pinY = getPinPosY(node, p, originY, zoom);
 
-            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= 64.0f;
+            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= hitDistSq;
             boolean isConnected = isInputConnected(graph, node.getId(), pin.getId());
             int pinColor = pin.getType().getColor();
 
             if (isOld) {
-                // Square 6x6 pin directly on the left edge
-                float pinSize = 6.0f;
-                float pinLeft = pinX - 3.0f;
-                float pinTop = pinY - 3.0f;
+                float pinSize = 6.0f * zoom;
+                float pinLeft = pinX - 3.0f * zoom;
+                float pinTop = pinY - 3.0f * zoom;
 
                 if (pinHovered) {
-                    drawList.addRectFilled(pinLeft - 1.0f, pinTop - 1.0f, pinLeft + pinSize + 1.0f, pinTop + pinSize + 1.0f, ImColor.rgba(255, 255, 255, 60));
+                    drawList.addRectFilled(pinLeft - 1.0f * zoom, pinTop - 1.0f * zoom, pinLeft + pinSize + 1.0f * zoom, pinTop + pinSize + 1.0f * zoom, ImColor.rgba(255, 255, 255, 60));
                 }
 
                 int fillCol = isConnected ? pinColor : ((pinColor & 0x00FFFFFF) | 0x44000000);
@@ -1242,10 +1325,10 @@ public final class SputnikNodeGraphPanel {
                 drawList.addRect(pinLeft, pinTop, pinLeft + pinSize, pinTop + pinSize, outCol, 0.0f, 0, 1.0f);
 
                 if (!isDisplay) {
-                    drawList.addText(pinX + 8.0f, pinY - 7.0f, 0xFFCAD1D9, pin.getName());
+                    drawList.addText(pinX + 8.0f * zoom, pinY - 7.0f * zoom, 0xFFCAD1D9, pin.getName());
                 }
             } else {
-                float radius = pinHovered ? 5.5f : 4.2f;
+                float radius = (pinHovered ? 5.5f : 4.2f) * Math.max(0.6f, Math.min(1.4f, zoom));
                 if (isConnected) {
                     drawList.addCircleFilled(pinX, pinY, radius, pinColor);
                     drawList.addCircle(pinX, pinY, radius, ImColor.rgba(18, 20, 24, 255), 16, 1.2f);
@@ -1255,11 +1338,11 @@ public final class SputnikNodeGraphPanel {
                 }
 
                 if (pinHovered) {
-                    drawList.addCircle(pinX, pinY, radius + 2.0f, ImColor.rgba(255, 255, 255, 180), 16, 1.2f);
+                    drawList.addCircle(pinX, pinY, radius + 2.0f * zoom, ImColor.rgba(255, 255, 255, 180), 16, 1.2f);
                 }
 
                 if (!isDisplay) {
-                    drawList.addText(pinX + 9.0f, pinY - 7.0f, 0xFFCAD1D9, pin.getName());
+                    drawList.addText(pinX + 8.0f * zoom, pinY - 7.0f * zoom, 0xFFCAD1D9, pin.getName());
                 }
             }
         }
@@ -1267,21 +1350,20 @@ public final class SputnikNodeGraphPanel {
         List<SputnikPin> outputs = node.getOutputs();
         for (int p = 0; p < outputs.size(); p++) {
             SputnikPin pin = outputs.get(p);
-            float pinX = getPinPosX(node, pin, false, originX);
-            float pinY = getPinPosY(node, p, originY);
+            float pinX = getPinPosX(node, pin, false, originX, zoom);
+            float pinY = getPinPosY(node, p, originY, zoom);
 
-            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= 64.0f;
+            boolean pinHovered = (mouseX - pinX) * (mouseX - pinX) + (mouseY - pinY) * (mouseY - pinY) <= hitDistSq;
             boolean isConnected = isOutputConnected(graph, node.getId(), pin.getId());
             int pinColor = pin.getType().getColor();
 
             if (isOld) {
-                // Square 6x6 pin directly on the right edge
-                float pinSize = 6.0f;
-                float pinLeft = pinX - 3.0f;
-                float pinTop = pinY - 3.0f;
+                float pinSize = 6.0f * zoom;
+                float pinLeft = pinX - 3.0f * zoom;
+                float pinTop = pinY - 3.0f * zoom;
 
                 if (pinHovered) {
-                    drawList.addRectFilled(pinLeft - 1.0f, pinTop - 1.0f, pinLeft + pinSize + 1.0f, pinTop + pinSize + 1.0f, ImColor.rgba(255, 255, 255, 60));
+                    drawList.addRectFilled(pinLeft - 1.0f * zoom, pinTop - 1.0f * zoom, pinLeft + pinSize + 1.0f * zoom, pinTop + pinSize + 1.0f * zoom, ImColor.rgba(255, 255, 255, 60));
                 }
 
                 int fillCol = isConnected ? pinColor : ((pinColor & 0x00FFFFFF) | 0x44000000);
@@ -1290,11 +1372,11 @@ public final class SputnikNodeGraphPanel {
                 drawList.addRect(pinLeft, pinTop, pinLeft + pinSize, pinTop + pinSize, outCol, 0.0f, 0, 1.0f);
 
                 if (!isConstant) {
-                    float tw = pin.getName().length() * 7.2f;
-                    drawList.addText(pinX - 8.0f - tw, pinY - 7.0f, 0xFFCAD1D9, pin.getName());
+                    float tw = pin.getName().length() * 7.2f * zoom;
+                    drawList.addText(pinX - 8.0f * zoom - tw, pinY - 7.0f * zoom, 0xFFCAD1D9, pin.getName());
                 }
             } else {
-                float radius = pinHovered ? 5.5f : 4.2f;
+                float radius = (pinHovered ? 5.5f : 4.2f) * Math.max(0.6f, Math.min(1.4f, zoom));
                 if (isConnected) {
                     drawList.addCircleFilled(pinX, pinY, radius, pinColor);
                     drawList.addCircle(pinX, pinY, radius, ImColor.rgba(18, 20, 24, 255), 16, 1.2f);
@@ -1304,12 +1386,12 @@ public final class SputnikNodeGraphPanel {
                 }
 
                 if (pinHovered) {
-                    drawList.addCircle(pinX, pinY, radius + 2.0f, ImColor.rgba(255, 255, 255, 180), 16, 1.2f);
+                    drawList.addCircle(pinX, pinY, radius + 2.0f * zoom, ImColor.rgba(255, 255, 255, 180), 16, 1.2f);
                 }
 
                 if (!isConstant) {
                     float tw = ImGui.calcTextSize(pin.getName()).x;
-                    drawList.addText(pinX - 9.0f - tw, pinY - 7.0f, 0xFFCAD1D9, pin.getName());
+                    drawList.addText(pinX - 9.0f * zoom - tw, pinY - 7.0f * zoom, 0xFFCAD1D9, pin.getName());
                 }
             }
         }
@@ -1329,16 +1411,17 @@ public final class SputnikNodeGraphPanel {
         return false;
     }
 
-    private static void checkLinkDrop(SputnikGraph graph, float originX, float originY, float mx, float my) {
+    private static void checkLinkDrop(SputnikGraph graph, float originX, float originY, float mx, float my, float zoom) {
         if (dragFromNodeId == -1 || dragFromPinId == null) return;
 
+        float hitDistSq = Math.max(36.0f, 64.0f * zoom * zoom);
         for (SputnikNode targetNode : graph.getNodes()) {
             if (targetNode.getId() == dragFromNodeId) continue;
 
             for (SputnikPin pin : targetNode.getInputs()) {
-                ImVec2 pos = getPinPos(targetNode, pin.getId(), originX, originY);
+                ImVec2 pos = getPinPos(targetNode, pin.getId(), originX, originY, zoom);
                 float distSq = (mx - pos.x) * (mx - pos.x) + (my - pos.y) * (my - pos.y);
-                if (distSq <= 64.0f) {
+                if (distSq <= hitDistSq) {
                     graph.addLink(dragFromNodeId, dragFromPinId, targetNode.getId(), pin.getId());
                     return;
                 }
@@ -1346,12 +1429,12 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static ImVec2 getPinPos(SputnikNode node, String pinId, float originX, float originY) {
+    private static ImVec2 getPinPos(SputnikNode node, String pinId, float originX, float originY, float zoom) {
         List<SputnikPin> inputs = node.getInputs();
         for (int p = 0; p < inputs.size(); p++) {
             SputnikPin pin = inputs.get(p);
             if (pin.getId().equals(pinId)) {
-                return new ImVec2(getPinPosX(node, pin, true, originX), getPinPosY(node, p, originY));
+                return new ImVec2(getPinPosX(node, pin, true, originX, zoom), getPinPosY(node, p, originY, zoom));
             }
         }
 
@@ -1359,11 +1442,11 @@ public final class SputnikNodeGraphPanel {
         for (int p = 0; p < outputs.size(); p++) {
             SputnikPin pin = outputs.get(p);
             if (pin.getId().equals(pinId)) {
-                return new ImVec2(getPinPosX(node, pin, false, originX), getPinPosY(node, p, originY));
+                return new ImVec2(getPinPosX(node, pin, false, originX, zoom), getPinPosY(node, p, originY, zoom));
             }
         }
 
-        return new ImVec2(originX + node.getX(), originY + node.getY());
+        return new ImVec2(originX + node.getX() * zoom, originY + node.getY() * zoom);
     }
 
     private static void handleNodeContextMenu(SputnikGraph graph) {
@@ -1380,7 +1463,7 @@ public final class SputnikNodeGraphPanel {
                     disconnectSelectedWires(graph);
                 }
                 ImGui.separator();
-                if (ImGui.menuItem("Delete Node (X)")) {
+                if (ImGui.menuItem("Delete Node (X / Del)")) {
                     deleteSelected(graph);
                 }
             }
@@ -1388,14 +1471,14 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static void handleCanvasContextMenu(SputnikGraph graph, float originX, float originY, ImGuiIO io) {
-        if (ImGui.isMouseClicked(ImGuiMouseButton.Right) && !isMouseOverAnyNode(graph, originX, originY, io.getMousePosX(), io.getMousePosY()) && !isBoxSelecting) {
+    private static void handleCanvasContextMenu(SputnikGraph graph, float originX, float originY, ImGuiIO io, float zoom) {
+        if (ImGui.isMouseClicked(ImGuiMouseButton.Right) && !isMouseOverAnyNode(graph, originX, originY, io.getMousePosX(), io.getMousePosY(), zoom) && !isBoxSelecting) {
             ImGui.openPopup("CanvasContextMenu");
         }
 
         if (ImGui.beginPopup("CanvasContextMenu")) {
-            float spawnX = io.getMousePosX() - originX;
-            float spawnY = io.getMousePosY() - originY;
+            float spawnX = (io.getMousePosX() - originX) / zoom;
+            float spawnY = (io.getMousePosY() - originY) / zoom;
 
             ImGui.textColored(0.4f, 0.8f, 1.0f, 1.0f, "Create: Cosmonautics Nodes");
             ImGui.separator();
@@ -1426,6 +1509,10 @@ public final class SputnikNodeGraphPanel {
                 graph.setPanX(0.0f);
                 graph.setPanY(0.0f);
             }
+            String zoomLabel = String.format(Locale.ROOT, "Reset Zoom (%.0f%%)", graph.getZoom() * 100.0f);
+            if (ImGui.menuItem(zoomLabel)) {
+                graph.setZoom(1.0f);
+            }
             if (ImGui.menuItem("Clear All Nodes")) {
                 graph.getNodes().clear();
                 graph.getLinks().clear();
@@ -1436,11 +1523,13 @@ public final class SputnikNodeGraphPanel {
         }
     }
 
-    private static boolean isMouseOverAnyNode(SputnikGraph graph, float originX, float originY, float mx, float my) {
+    private static boolean isMouseOverAnyNode(SputnikGraph graph, float originX, float originY, float mx, float my, float zoom) {
         for (SputnikNode n : graph.getNodes()) {
-            float nx = originX + n.getX();
-            float ny = originY + n.getY();
-            if (mx >= nx && mx <= nx + n.getWidth() && my >= ny && my <= ny + n.getHeight()) {
+            float nx = originX + n.getX() * zoom;
+            float ny = originY + n.getY() * zoom;
+            float nw = n.getWidth() * zoom;
+            float nh = n.getHeight() * zoom;
+            if (mx >= nx && mx <= nx + nw && my >= ny && my <= ny + nh) {
                 return true;
             }
         }
