@@ -300,6 +300,11 @@ public class PlanetRenderer {
             }
         }
 
+        RenderSystem.defaultBlendFunc();
+        RenderSystem.enableCull();
+        RenderSystem.depthMask(true);
+        RenderSystem.enableDepthTest();
+
         ps.popPose();
     }
 
